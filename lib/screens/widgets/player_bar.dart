@@ -37,19 +37,27 @@ class _PlayerBarState extends State<PlayerBar> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          song.title,
-                          style: Theme.of(context).textTheme.titleMedium,
-                          overflow: TextOverflow.ellipsis,
+                                    Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              song.title,
+                              style: Theme.of(context).textTheme.titleMedium,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            Text(song.artist),
+                          ],
                         ),
-                        Text(song.artist),
-                      ],
-                    ),
+                      ),
+                      IconButton(
+                        tooltip: 'Cerrar reproductor',
+                        icon: const Icon(Icons.close),
+                        onPressed: widget.player.close,
+                      ),
+                    ],
                   ),
                   _buildProgress(),
                   _buildControls(),

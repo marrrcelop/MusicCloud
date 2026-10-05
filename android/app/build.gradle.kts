@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace = "com.example.music_cloud"
-    compileSdk = flutter.compileSdkVersion
+    compileSdk = 37
     ndkVersion = flutter.ndkVersion
 
     compileOptions {

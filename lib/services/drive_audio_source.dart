@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:just_audio/just_audio.dart';
+import 'app_error.dart';
 
 /// Una función que entrega las cabeceras con el token de Google.
 typedef HeadersProvider = Future<Map<String, String>?> Function({
@@ -34,7 +35,7 @@ class DriveAudioSource extends StreamAudioSource {
 
     if (response.statusCode != 200 && response.statusCode != 206) {
       await response.stream.drain<void>();
-      throw Exception('Drive respondió ${response.statusCode}');
+      throw DriveException(response.statusCode);
     }
 
     // Tamaño total del archivo: viene en "Content-Range: bytes 0-999/12345"
@@ -59,9 +60,7 @@ class DriveAudioSource extends StreamAudioSource {
     required bool forceRefresh,
   }) async {
     final headers = await getHeaders(forceRefresh: forceRefresh);
-    if (headers == null) {
-      throw Exception('No hay sesión de Google activa');
-    }
+    if (headers == null) throw const SessionException();
 
     final request = http.Request(
       'GET',
@@ -78,6 +77,6 @@ class DriveAudioSource extends StreamAudioSource {
       request.headers['Range'] = 'bytes=${start ?? 0}-$last';
     }
 
-    return _client.send(request);
+    return _client.send(request).timeout(const Duration(seconds: 20));
   }
 }

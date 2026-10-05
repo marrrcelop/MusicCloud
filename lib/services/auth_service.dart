@@ -9,6 +9,7 @@ class AuthService {
   final GoogleSignIn _signIn = GoogleSignIn.instance;
   GoogleSignInAccount? _user;
   bool _initialized = false;
+  
 
   Future<void> _init() async {
     if (_initialized) return;
@@ -57,8 +58,17 @@ class AuthService {
 
   bool get isSignedIn => _user != null;
 
+  /// Correo de la cuenta conectada (para mostrarlo en el menú).
+  String? get userEmail => _user?.email;
+
   Future<void> signOut() async {
-    await _signIn.signOut();
-    _user = null;
+    try {
+      await _signIn.signOut();
+    } finally {
+      _user = null;
+    }
   }
+    static bool isCancelled(Object error) =>
+      error is GoogleSignInException &&
+      error.code == GoogleSignInExceptionCode.canceled;
 }
