@@ -24,7 +24,10 @@ class AlbumList extends StatelessWidget {
         return ListTile(
           leading: AlbumCover(album: album),
           title: Text(album.name),
-          subtitle: Text(songCountText(countOf(album))),
+          subtitle: Text([
+            if (album.artist != null) album.artist!,
+            songCountText(countOf(album)),
+          ].join(' · ')),
           trailing: const Icon(Icons.chevron_right),
           onTap: () => onTap(album),
         );

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../models/song.dart';
 import '../../services/player_service.dart';
+import 'cover_art.dart';
 
 class SongList extends StatelessWidget {
   final PlayerService player;
@@ -26,15 +27,15 @@ class SongList extends StatelessWidget {
             final song = songs[index];
             final isCurrent = song == current;
             return ListTile(
-              leading: Icon(
-                isCurrent
-                    ? Icons.graphic_eq
-                    : song.source == SongSource.drive
-                        ? Icons.cloud
-                        : Icons.phone_android,
+              leading: CoverArt(
+                seed: song.albumId ?? song.id,
+                imageUri: song.coverUri,
+                size: 44,
+                icon: Icons.music_note,
               ),
               title: Text(song.title),
               subtitle: Text(song.artist),
+              trailing: isCurrent ? const Icon(Icons.graphic_eq) : null,
               selected: isCurrent,
               onTap: () => onTap(index),
             );

@@ -25,10 +25,10 @@ class Library {
 
   Library._(this.songs, this.albums, this._songsByAlbum);
 
-  /// Arma la biblioteca a partir de las canciones y los nombres de las carpetas.
+  /// Arma la biblioteca a partir de las canciones y los álbumes (carpetas).
   factory Library.build({
     required List<Song> songs,
-    required Map<String, String> folderNames,
+    required Map<String, Album> folders,
   }) {
     final sorted = [...songs]
       ..sort((a, b) => sortKey(a.title).compareTo(sortKey(b.title)));
@@ -36,20 +36,20 @@ class Library {
     final byAlbum = <String, List<Song>>{};
     for (final song in sorted) {
       final parent = song.albumId;
-      final key = (parent != null && folderNames.containsKey(parent))
-          ? parent
-          : noAlbumId;
+      final key =
+          (parent != null && folders.containsKey(parent)) ? parent : noAlbumId;
       byAlbum.putIfAbsent(key, () => []).add(song);
+    }
+
+    // Dentro de un álbum, las pistas siguen el nombre del archivo (01, 02...).
+    for (final list in byAlbum.values) {
+      list.sort((a, b) => sortKey(a.fileName ?? a.title)
+          .compareTo(sortKey(b.fileName ?? b.title)));
     }
 
     final albums = <Album>[
       for (final entry in byAlbum.entries)
-        if (entry.key != noAlbumId)
-          Album(
-            id: entry.key,
-            name: folderNames[entry.key]!,
-            source: SongSource.drive,
-          ),
+        if (entry.key != noAlbumId) folders[entry.key]!,
     ]..sort((a, b) => sortKey(a.name).compareTo(sortKey(b.name)));
 
     if (byAlbum.containsKey(noAlbumId)) {

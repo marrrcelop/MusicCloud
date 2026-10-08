@@ -48,6 +48,7 @@ class PlayerService {
   Stream<double> get volumeStream => _player.volumeStream;
   Stream<bool> get shuffleStream => _player.shuffleModeEnabledStream;
   Stream<double> get boostStream => _loudness.targetGainStream;
+  Song? get currentSong => _current;
 
   /// Canción actual. Entrega primero el valor de ahora y luego los cambios.
   Stream<Song?> get currentSongStream async* {
@@ -126,7 +127,14 @@ class PlayerService {
   }
 
   Future<void> next() => _player.seekToNext();
-  Future<void> previous() => _player.seekToPrevious();
+  Future<void> previous() async {
+    final pastStart = _player.position > const Duration(seconds: 3);
+    if (pastStart || !_player.hasPrevious) {
+      await _player.seek(Duration.zero);
+    } else {
+      await _player.seekToPrevious();
+    }
+  }
 
   Future<void> setShuffle(bool enabled) async {
     if (enabled) await _player.shuffle();

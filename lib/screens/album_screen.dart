@@ -6,6 +6,7 @@ import '../services/player_service.dart';
 import 'widgets/album_cover.dart';
 import 'widgets/player_bar.dart';
 import 'widgets/song_list.dart';
+import 'widgets/mascot_overlay.dart';
 
 class AlbumScreen extends StatelessWidget {
   final Album album;
@@ -44,6 +45,12 @@ class AlbumScreen extends StatelessWidget {
                         overflow: TextOverflow.ellipsis,
                       ),
                       Text(songCountText(songs.length)),
+                      if (album.details.isNotEmpty)
+                        Text(
+                          album.details,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       const SizedBox(height: 8),
                       FilledButton.icon(
                         icon: const Icon(Icons.play_arrow),
@@ -68,6 +75,7 @@ class AlbumScreen extends StatelessWidget {
         ],
       ),
       bottomNavigationBar: PlayerBar(player: player),
+      floatingActionButton: const MascotOverlay(),
     );
   }
 }

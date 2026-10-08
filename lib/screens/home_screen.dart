@@ -14,8 +14,11 @@ import 'widgets/album_list.dart';
 import 'widgets/player_bar.dart';
 import 'widgets/song_list.dart';
 import 'album_screen.dart';
+import 'widgets/mascot_overlay.dart';
+import 'settings_screen.dart';
+import '../services/cover_cache.dart';
 
-enum _MenuAction { notifications, signOut }
+enum _MenuAction { settings, notifications, signOut }
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -46,6 +49,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    CoverCache.instance.getHeaders = _auth.getHeaders;
     _startListening();
     _tryAutoLogin();
   }
@@ -272,6 +276,10 @@ class _HomeScreenState extends State<HomeScreen> {
         _permissions.openSettings();
       case _MenuAction.signOut:
         _confirmSignOut();
+      case _MenuAction.settings:
+        Navigator.of(context).push(MaterialPageRoute<void>(
+          builder: (_) => const SettingsScreen(),
+        ));
     }
   }
 
@@ -303,6 +311,10 @@ class _HomeScreenState extends State<HomeScreen> {
                       child: Text(email),
                     ),
                   const PopupMenuItem<_MenuAction>(
+                    value: _MenuAction.settings,
+                    child: Text('Personalización'),
+                  ),
+                  const PopupMenuItem<_MenuAction>(
                     value: _MenuAction.notifications,
                     child: Text('Ajustes de notificaciones'),
                   ),
@@ -331,8 +343,10 @@ class _HomeScreenState extends State<HomeScreen> {
           ],
         ),
         bottomNavigationBar: PlayerBar(player: _player),
+        floatingActionButton: const MascotOverlay(),
       ),
     );
+
   }
 
   Widget _buildOfflineBanner() {

@@ -2,6 +2,10 @@ import 'dart:ui' show PlatformDispatcher;
 import 'package:flutter/material.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 import 'screens/home_screen.dart';
+import 'settings/app_fonts.dart';
+import 'settings/app_themes.dart';
+import 'settings/settings_controller.dart';
+import 'settings/settings_scope.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -23,21 +27,31 @@ Future<void> main() async {
     androidNotificationChannelName: 'Reproducción de música',
     androidNotificationOngoing: true,
   );
-  runApp(const MusicCloudApp());
+
+  final settings = await SettingsController.load();
+  runApp(MusicCloudApp(settings: settings));
 }
 
 class MusicCloudApp extends StatelessWidget {
-  const MusicCloudApp({super.key});
+  final SettingsController settings;
+
+  const MusicCloudApp({super.key, required this.settings});
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'MusicCloud',
-      theme: ThemeData(
-        colorSchemeSeed: Colors.deepPurple,
-        useMaterial3: true,
+    return SettingsScope(
+      controller: settings,
+      child: ListenableBuilder(
+        listenable: settings,
+        builder: (context, _) {
+          return MaterialApp(
+            title: 'MusicCloud',
+            theme: AppThemes.byId(settings.themeId)
+                .build(AppFonts.byId(settings.fontId)),
+            home: const HomeScreen(),
+          );
+        },
       ),
-      home: const HomeScreen(),
     );
   }
 }
