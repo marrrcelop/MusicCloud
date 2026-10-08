@@ -3,6 +3,8 @@ import '../../models/song.dart';
 import '../../screens/now_playing_screen.dart';
 import '../../services/player_service.dart';
 import 'cover_art.dart';
+import '../../settings/app_themes.dart';
+import '../../settings/settings_scope.dart';
 
 /// Barra compacta de abajo. Al tocarla se abre la pantalla completa.
 class PlayerBar extends StatelessWidget {
@@ -26,7 +28,14 @@ class PlayerBar extends StatelessWidget {
         final song = snapshot.data;
         if (song == null) return const SizedBox.shrink();
 
+                final scheme = Theme.of(context).colorScheme;
+        final translucent =
+            AppThemes.byId(SettingsScope.of(context).themeId).transparent;
+
         return Material(
+          color: translucent
+              ? scheme.surfaceContainer.withValues(alpha: 0.78)
+              : null,
           elevation: 8,
           child: SafeArea(
             top: false,

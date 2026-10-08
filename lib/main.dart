@@ -6,6 +6,8 @@ import 'settings/app_fonts.dart';
 import 'settings/app_themes.dart';
 import 'settings/settings_controller.dart';
 import 'settings/settings_scope.dart';
+import 'screens/widgets/app_background.dart';
+import 'screens/widgets/mascot_overlay.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -48,6 +50,17 @@ class MusicCloudApp extends StatelessWidget {
             title: 'MusicCloud',
             theme: AppThemes.byId(settings.themeId)
                 .build(AppFonts.byId(settings.fontId)),
+            // Capas: fondo (abajo), pantallas (en medio) y mascota (arriba).
+            builder: (context, child) {
+              return Stack(
+                fit: StackFit.expand,
+                children: [
+                  const AppBackground(),
+                  if (child != null) child,
+                  const MascotOverlay(),
+                ],
+              );
+            },
             home: const HomeScreen(),
           );
         },

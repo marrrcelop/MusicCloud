@@ -14,7 +14,6 @@ import 'widgets/album_list.dart';
 import 'widgets/player_bar.dart';
 import 'widgets/song_list.dart';
 import 'album_screen.dart';
-import 'widgets/mascot_overlay.dart';
 import 'settings_screen.dart';
 import '../services/cover_cache.dart';
 
@@ -342,8 +341,7 @@ class _HomeScreenState extends State<HomeScreen> {
             Expanded(child: _buildContent()),
           ],
         ),
-        bottomNavigationBar: PlayerBar(player: _player),
-        floatingActionButton: const MascotOverlay(),
+        bottomNavigationBar: PlayerBar(player: _player)
       ),
     );
 

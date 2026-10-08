@@ -5,6 +5,7 @@ import '../settings/app_themes.dart';
 import '../settings/progress_styles.dart';
 import '../settings/settings_scope.dart';
 import 'widgets/progress_bar_data.dart';
+import 'mascot_position_screen.dart';
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
@@ -28,9 +29,12 @@ class SettingsScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final settings = SettingsScope.of(context);
+    final theme = AppThemes.byId(settings.themeId);
     final style = ProgressStyles.byId(settings.progressStyleId);
     final mascotPath = settings.mascotPath;
     final spritePath = settings.spritePath;
+    final backgroundPath = settings.backgroundPath;
+    final small = Theme.of(context).textTheme.bodySmall;
 
     return Scaffold(
       appBar: AppBar(title: const Text('Personalización')),
@@ -41,15 +45,62 @@ class SettingsScreen extends StatelessWidget {
           const _SectionTitle('Tema'),
           Wrap(
             spacing: 8,
+            runSpacing: 4,
             children: [
-              for (final theme in AppThemes.all)
+              for (final t in AppThemes.all)
                 ChoiceChip(
-                  label: Text(theme.name),
-                  selected: theme.id == settings.themeId,
-                  onSelected: (_) => settings.setTheme(theme.id),
+                  label: Text(t.name),
+                  selected: t.id == settings.themeId,
+                  onSelected: (_) => settings.setTheme(t.id),
                 ),
             ],
           ),
+          const SizedBox(height: 8),
+          Text(
+            'Los temas Grunge, Emo y Scene también cambian la fuente y la barra '
+            'de progreso. Después puedes cambiarlas por separado.',
+            style: small,
+          ),
+
+          // ---------- Fondo (solo temas transparentes) ----------
+          if (theme.transparent) ...[
+            const _SectionTitle('Fondo'),
+            Text(
+              'Este tema deja ver una imagen detrás de las pantallas. '
+              'Si no eliges ninguna, se usa un degradado.',
+              style: small,
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              children: [
+                FilledButton.icon(
+                  icon: const Icon(Icons.wallpaper),
+                  label: Text(
+                    backgroundPath == null ? 'Elegir imagen' : 'Cambiar imagen',
+                  ),
+                  onPressed: () => _pickImage(context, settings.pickBackground),
+                ),
+                if (backgroundPath != null)
+                  TextButton(
+                    onPressed: settings.clearBackground,
+                    child: const Text('Quitar'),
+                  ),
+              ],
+            ),
+            Row(
+              children: [
+                const Text('Oscurecer'),
+                Expanded(
+                  child: Slider(
+                    value: settings.backgroundDim.clamp(0.0, 0.85).toDouble(),
+                    max: 0.85,
+                    onChanged: settings.setBackgroundDim,
+                  ),
+                ),
+              ],
+            ),
+          ],
 
           // ---------- Fuente ----------
           const _SectionTitle('Fuente'),
@@ -69,7 +120,7 @@ class SettingsScreen extends StatelessWidget {
           Text(
             'Las fuentes se descargan la primera vez que se usan, '
             'así que necesitan internet en ese momento.',
-            style: Theme.of(context).textTheme.bodySmall,
+            style: small,
           ),
 
           // ---------- Barra de progreso ----------
@@ -105,7 +156,7 @@ class SettingsScreen extends StatelessWidget {
               'Imagen en la punta de la barra (opcional). Usa un PNG o GIF, '
               'mejor con fondo transparente. Con un gato animado queda el '
               'estilo "nyan".',
-              style: Theme.of(context).textTheme.bodySmall,
+              style: small,
             ),
             const SizedBox(height: 8),
             Wrap(
@@ -133,7 +184,7 @@ class SettingsScreen extends StatelessWidget {
             contentPadding: EdgeInsets.zero,
             title: const Text('Mostrar mascota'),
             subtitle: const Text(
-              'Aparece abajo a la derecha, encima del reproductor. Es opcional.',
+              'Una imagen o GIF que flota sobre la app. Es opcional.',
             ),
             value: settings.mascotEnabled && mascotPath != null,
             onChanged: mascotPath == null ? null : settings.setMascotEnabled,
@@ -158,6 +209,16 @@ class SettingsScreen extends StatelessWidget {
             ],
           ),
           if (mascotPath != null) ...[
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              icon: const Icon(Icons.open_with),
+              label: const Text('Mover mascota'),
+              onPressed: settings.mascotEnabled
+                  ? () => Navigator.of(context).push(MaterialPageRoute<void>(
+                        builder: (_) => const MascotPositionScreen(),
+                      ))
+                  : null,
+            ),
             const SizedBox(height: 12),
             Row(
               children: [
