@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:async';
 import 'package:flutter/material.dart';
 import '../models/album.dart';
 import '../models/library.dart';
@@ -7,7 +6,8 @@ import '../models/song.dart';
 import '../services/app_error.dart';
 import '../services/auth_service.dart';
 import '../services/connectivity_service.dart';
-import '../services/drive_service.dart';
+import '../services/cover_cache.dart';
+import '../services/library_repository.dart';
 import '../services/permission_service.dart';
 import '../services/player_service.dart';
 import 'widgets/album_list.dart';
@@ -15,7 +15,6 @@ import 'widgets/player_bar.dart';
 import 'widgets/song_list.dart';
 import 'album_screen.dart';
 import 'settings_screen.dart';
-import '../services/cover_cache.dart';
 
 enum _MenuAction { settings, notifications, signOut }
 
@@ -29,36 +28,47 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   final PlayerService _player = PlayerService();
   final AuthService _auth = AuthService();
-  final DriveService _drive = DriveService();
   final ConnectivityService _connectivity = ConnectivityService();
   final PermissionService _permissions = PermissionService();
+  late final LibraryRepository _repo = LibraryRepository(
+    auth: _auth,
+    isOnline: () => _online,
+  );
 
   StreamSubscription<bool>? _connectionSub;
   StreamSubscription<Object>? _playerErrorSub;
 
-  Library? _library;
-  bool _loading = true;
+  /// True mientras se inicia sesión (también al abrir la app).
+  bool _signingIn = true;
   bool _online = true;
   bool _playbackFailed = false;
   bool _askedNotifications = false;
-  AppError? _error;
 
-  bool get _hasSongs => _library?.songs.isNotEmpty ?? false;
+  /// Error de inicio de sesión (los de la biblioteca están en el repositorio).
+  AppError? _authError;
 
   @override
   void initState() {
     super.initState();
+    // La caché de portadas necesita saber cómo pedir el token.
     CoverCache.instance.getHeaders = _auth.getHeaders;
+    _repo.addListener(_onRepoChanged);
     _startListening();
-    _tryAutoLogin();
+    _bootstrap();
   }
 
   @override
   void dispose() {
+    _repo.removeListener(_onRepoChanged);
+    _repo.dispose();
     _connectionSub?.cancel();
     _playerErrorSub?.cancel();
     _player.dispose();
     super.dispose();
+  }
+
+  void _onRepoChanged() {
+    if (mounted) setState(() {});
   }
 
   // ---------- Escuchas ----------
@@ -81,7 +91,9 @@ class _HomeScreenState extends State<HomeScreen> {
     await Future.delayed(const Duration(seconds: 1));
     if (!mounted) return;
 
-    if (!_hasSongs && !_loading && _error?.needsLogin != true) {
+    final busy = _repo.loading || _signingIn;
+    final needsLogin = (_repo.error ?? _authError)?.needsLogin ?? false;
+    if (!busy && !_repo.upToDate && !needsLogin) {
       _retryLibrary();
     }
     if (_playbackFailed) {
@@ -114,36 +126,45 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // ---------- Sesión ----------
 
+  /// Al abrir: primero muestra lo guardado en el teléfono (al instante) y
+  /// después inicia sesión y actualiza desde Drive por detrás.
+  Future<void> _bootstrap() async {
+    await _repo.loadSaved();
+    await _tryAutoLogin();
+  }
+
   Future<void> _tryAutoLogin() async {
-    _error = null;
-    if (!_loading) setState(() => _loading = true);
+    setState(() {
+      _authError = null;
+      _signingIn = true;
+    });
     try {
       if (await _auth.trySilentSignIn()) {
-        await _loadLibrary(interactive: false);
-        return;
+        await _refresh(interactive: false);
       }
     } catch (e) {
       debugPrint('Auto-login falló: $e');
-      if (!_online && mounted) setState(() => _error = AppError.offline);
+      if (!_online && mounted) setState(() => _authError = AppError.offline);
+    } finally {
+      if (mounted) setState(() => _signingIn = false);
     }
-    if (mounted) setState(() => _loading = false);
   }
 
   Future<void> _connect() async {
     setState(() {
-      _loading = true;
-      _error = null;
+      _authError = null;
+      _signingIn = true;
     });
     try {
       await _auth.signIn();
-      await _loadLibrary(interactive: true);
+      await _refresh(interactive: true);
     } catch (e) {
       debugPrint('Error de login: $e');
-      if (!mounted) return;
-      setState(() {
-        _loading = false;
-        if (!AuthService.isCancelled(e)) _error = _toAppError(e);
-      });
+      if (mounted && !AuthService.isCancelled(e)) {
+        setState(() => _authError = _toAppError(e));
+      }
+    } finally {
+      if (mounted) setState(() => _signingIn = false);
     }
   }
 
@@ -173,6 +194,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _signOut() async {
     await _player.close();
+    await _repo.clear();
     try {
       await _auth.signOut();
     } catch (e) {
@@ -180,45 +202,35 @@ class _HomeScreenState extends State<HomeScreen> {
     }
     if (!mounted) return;
     setState(() {
-      _library = null;
-      _error = null;
-      _loading = false;
+      _authError = null;
+      _signingIn = false;
       _playbackFailed = false;
     });
   }
 
-  // ---------- Biblioteca y reproducción ----------
+  // ---------- Biblioteca ----------
 
-  Future<void> _loadLibrary({required bool interactive}) async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    try {
-      final headers = await _auth.getHeaders(interactive: interactive);
-      if (headers == null) throw const SessionException();
-      final library = await _drive.fetchLibrary(_auth.getHeaders);
-      if (!mounted) return;
-      setState(() => _library = library);
-    } catch (e) {
-      debugPrint('Error cargando la biblioteca: $e');
-      if (!mounted) return;
-      final error = _toAppError(e);
-      if (!_hasSongs) {
-        setState(() => _error = error);
-      } else {
-        _showError(error.message); // conservamos la biblioteca que ya teníamos
-      }
-    } finally {
-      if (mounted) setState(() => _loading = false);
+  /// Actualiza la biblioteca y avisa al usuario si hace falta.
+  Future<void> _refresh({required bool interactive}) async {
+    final result = await _repo.refresh(interactive: interactive);
+    if (!mounted) return;
+
+    if (result.status == RefreshStatus.incomplete) {
+      _showError(
+        'Algunas portadas o datos no se pudieron cargar. '
+        'Toca actualizar para reintentar.',
+      );
+    } else if (result.status == RefreshStatus.failed && _repo.hasSongs) {
+      // Si ya hay biblioteca a la vista, solo avisamos; no la tapamos.
+      _showError(result.error!.message);
     }
   }
 
   Future<void> _retryLibrary() {
-    return _auth.isSignedIn
-        ? _loadLibrary(interactive: false)
-        : _tryAutoLogin();
+    return _auth.isSignedIn ? _refresh(interactive: false) : _tryAutoLogin();
   }
+
+  // ---------- Reproducción ----------
 
   /// Pide el permiso de notificaciones, una sola vez por sesión.
   Future<void> _askNotificationsOnce() async {
@@ -258,6 +270,8 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  // ---------- Navegación ----------
+
   void _openAlbum(Library library, Album album) {
     Navigator.of(context).push(MaterialPageRoute<void>(
       builder: (_) => AlbumScreen(
@@ -271,14 +285,14 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _onMenuSelected(_MenuAction action) {
     switch (action) {
-      case _MenuAction.notifications:
-        _permissions.openSettings();
-      case _MenuAction.signOut:
-        _confirmSignOut();
       case _MenuAction.settings:
         Navigator.of(context).push(MaterialPageRoute<void>(
           builder: (_) => const SettingsScreen(),
         ));
+      case _MenuAction.notifications:
+        _permissions.openSettings();
+      case _MenuAction.signOut:
+        _confirmSignOut();
     }
   }
 
@@ -286,6 +300,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final busy = _repo.loading || _signingIn;
+
     return DefaultTabController(
       length: 2,
       child: Scaffold(
@@ -296,8 +312,7 @@ class _HomeScreenState extends State<HomeScreen> {
               IconButton(
                 tooltip: 'Actualizar biblioteca',
                 icon: const Icon(Icons.refresh),
-                onPressed:
-                    _loading ? null : () => _loadLibrary(interactive: true),
+                onPressed: busy ? null : () => _refresh(interactive: true),
               ),
             PopupMenuButton<_MenuAction>(
               onSelected: _onMenuSelected,
@@ -326,7 +341,7 @@ class _HomeScreenState extends State<HomeScreen> {
               },
             ),
           ],
-          bottom: _hasSongs
+          bottom: _repo.hasSongs
               ? const TabBar(
                   tabs: [
                     Tab(text: 'Canciones'),
@@ -338,13 +353,14 @@ class _HomeScreenState extends State<HomeScreen> {
         body: Column(
           children: [
             if (!_online) _buildOfflineBanner(),
+            if (!_auth.isSignedIn && _repo.hasSongs && !busy)
+              _buildSessionBanner(),
             Expanded(child: _buildContent()),
           ],
         ),
-        bottomNavigationBar: PlayerBar(player: _player)
+        bottomNavigationBar: PlayerBar(player: _player),
       ),
     );
-
   }
 
   Widget _buildOfflineBanner() {
@@ -364,18 +380,39 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildContent() {
-    final library = _library;
-    if (library != null && library.songs.isNotEmpty) {
-      return _buildLibrary(library);
-    }
-    if (_loading) return const Center(child: CircularProgressIndicator());
+  Widget _buildSessionBanner() {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      color: scheme.tertiaryContainer,
+      padding: const EdgeInsets.fromLTRB(16, 4, 8, 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              'Sin sesión de Google: puedes ver tu biblioteca, pero no reproducir.',
+              style: TextStyle(color: scheme.onTertiaryContainer),
+            ),
+          ),
+          TextButton(onPressed: _connect, child: const Text('Iniciar sesión')),
+        ],
+      ),
+    );
+  }
 
-    final error = _error;
+  Widget _buildContent() {
+    final library = _repo.library;
+    if (_repo.hasSongs && library != null) return _buildLibrary(library);
+    if (_repo.loading || _signingIn) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    final error = _repo.error ?? _authError;
     if (error != null) {
       return _buildMessage(
         icon: _iconFor(error),
         text: error.message,
+        detail: error.detail,
         buttonLabel: error.needsLogin ? 'Iniciar sesión de nuevo' : 'Reintentar',
         onPressed: () => error.needsLogin ? _connect() : _retryLibrary(),
       );
@@ -394,14 +431,14 @@ class _HomeScreenState extends State<HomeScreen> {
       icon: Icons.library_music,
       text: 'No se encontraron canciones en tu Drive',
       buttonLabel: 'Actualizar',
-      onPressed: () => _loadLibrary(interactive: false),
+      onPressed: () => _refresh(interactive: false),
     );
   }
 
   Widget _buildLibrary(Library library) {
     return Column(
       children: [
-        if (_loading) const LinearProgressIndicator(),
+        if (_repo.loading || _signingIn) const LinearProgressIndicator(),
         Expanded(
           child: TabBarView(
             children: [
@@ -427,6 +464,7 @@ class _HomeScreenState extends State<HomeScreen> {
     required String text,
     required String buttonLabel,
     required VoidCallback onPressed,
+    String? detail,
   }) {
     return Center(
       child: Padding(
@@ -437,6 +475,15 @@ class _HomeScreenState extends State<HomeScreen> {
             Icon(icon, size: 64),
             const SizedBox(height: 16),
             Text(text, textAlign: TextAlign.center),
+            if (detail != null) ...[
+              const SizedBox(height: 12),
+              SelectableText(
+                detail,
+                textAlign: TextAlign.center,
+                maxLines: 6,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
             const SizedBox(height: 16),
             FilledButton(onPressed: onPressed, child: Text(buttonLabel)),
           ],

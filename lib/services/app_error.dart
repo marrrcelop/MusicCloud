@@ -35,11 +35,19 @@ class AppError {
   final AppErrorType type;
   final String message;
 
-  const AppError(this.type, this.message);
+  /// Texto técnico del error original, para poder diagnosticar.
+  final String? detail;
+
+  const AppError(this.type, this.message, {this.detail});
 
   static const offline = AppError(
     AppErrorType.noInternet,
     'Sin conexión a internet. Revisa tu red e inténtalo de nuevo.',
+  );
+
+  static const _slow = AppError(
+    AppErrorType.driveBusy,
+    'La conexión con Drive está lenta o se cortó. Inténtalo de nuevo.',
   );
 
   bool get needsLogin => type == AppErrorType.sessionExpired;
@@ -47,11 +55,24 @@ class AppError {
   /// Convierte cualquier excepción en un AppError con mensaje claro.
   factory AppError.from(Object error) {
     if (error is AppError) return error;
+    final base = _classify(error);
+    var text = error.toString();
+    if (text.length > 300) text = '${text.substring(0, 300)}...';
+    return AppError(base.type, base.message, detail: text);
+  }
 
-    if (error is SocketException ||
-        error is http.ClientException ||
-        error is TimeoutException) {
-      return offline;
+  static AppError _classify(Object error) {
+    if (error is SocketException) return offline;
+
+    if (error is TimeoutException) return _slow;
+
+    if (error is http.ClientException) {
+      final text = error.message;
+      if (text.contains('Failed host lookup') ||
+          text.contains('Network is unreachable')) {
+        return offline;
+      }
+      return _slow;
     }
 
     if (error is SessionException) {

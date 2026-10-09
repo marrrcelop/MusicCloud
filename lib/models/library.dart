@@ -23,12 +23,16 @@ class Library {
   final List<Album> albums;
   final Map<String, List<Song>> _songsByAlbum;
 
-  Library._(this.songs, this.albums, this._songsByAlbum);
+  /// True si faltaron portadas o datos porque Drive no respondió a tiempo.
+  final bool incomplete;
+
+  Library._(this.songs, this.albums, this._songsByAlbum, this.incomplete);
 
   /// Arma la biblioteca a partir de las canciones y los álbumes (carpetas).
   factory Library.build({
     required List<Song> songs,
     required Map<String, Album> folders,
+    bool incomplete = false,
   }) {
     final sorted = [...songs]
       ..sort((a, b) => sortKey(a.title).compareTo(sortKey(b.title)));
@@ -60,7 +64,34 @@ class Library {
       ));
     }
 
-    return Library._(sorted, albums, byAlbum);
+    return Library._(sorted, albums, byAlbum, incomplete);
+  }
+
+  /// Convierte la biblioteca a un mapa (para guardarla en el teléfono).
+  Map<String, dynamic> toMap() {
+    return {
+      'songs': [for (final s in songs) s.toMap()],
+      'albums': [
+        for (final a in albums)
+          if (a.id != noAlbumId) a.toMap(),
+      ],
+    };
+  }
+
+  /// Reconstruye la biblioteca guardada con [toMap].
+  factory Library.fromMap(Map<String, dynamic> map) {
+    final songs = [
+      for (final m in (map['songs'] as List))
+        Song.fromMap(m as Map<String, dynamic>),
+    ];
+    final albums = [
+      for (final m in (map['albums'] as List))
+        Album.fromMap(m as Map<String, dynamic>),
+    ];
+    return Library.build(
+      songs: songs,
+      folders: {for (final a in albums) a.id: a},
+    );
   }
 
   List<Song> songsOf(String albumId) => _songsByAlbum[albumId] ?? const [];
