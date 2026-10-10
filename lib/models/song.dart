@@ -1,6 +1,8 @@
 enum SongSource { drive, local }
 
 class Song {
+  static const unknownArtist = 'Artista desconocido';
+
   final String id;
   final String title;
   final String artist;
@@ -16,6 +18,9 @@ class Song {
   final String? genre;
   final int? year;
 
+  /// Cuándo se subió el archivo a Drive.
+  final DateTime? added;
+
   const Song({
     required this.id,
     required this.title,
@@ -29,7 +34,8 @@ class Song {
     this.duration,
     this.genre,
     this.year,
-  }) : artist = artist ?? 'Artista desconocido';
+    this.added,
+  }) : artist = artist ?? unknownArtist;
 
   /// Línea de datos para mostrar bajo el título: "Álbum · año · género".
   String get details => [
@@ -51,6 +57,7 @@ class Song {
     Duration? duration,
     String? genre,
     int? year,
+    DateTime? added,
   }) {
     return Song(
       id: id ?? this.id,
@@ -65,6 +72,7 @@ class Song {
       duration: duration ?? this.duration,
       genre: genre ?? this.genre,
       year: year ?? this.year,
+      added: added ?? this.added,
     );
   }
 
@@ -82,11 +90,13 @@ class Song {
       'durationMs': duration?.inMilliseconds,
       'genre': genre,
       'year': year,
+      'addedMs': added?.millisecondsSinceEpoch,
     };
   }
 
   factory Song.fromMap(Map<String, dynamic> map) {
-    final ms = map['durationMs'] as int?;
+    final durationMs = map['durationMs'] as int?;
+    final addedMs = map['addedMs'] as int?;
     return Song(
       id: map['id'] as String,
       title: map['title'] as String,
@@ -97,9 +107,13 @@ class Song {
       albumId: map['albumId'] as String?,
       albumName: map['albumName'] as String?,
       coverUri: map['coverUri'] as String?,
-      duration: ms == null ? null : Duration(milliseconds: ms),
+      duration:
+          durationMs == null ? null : Duration(milliseconds: durationMs),
       genre: map['genre'] as String?,
       year: map['year'] as int?,
+      added: addedMs == null
+          ? null
+          : DateTime.fromMillisecondsSinceEpoch(addedMs),
     );
   }
 

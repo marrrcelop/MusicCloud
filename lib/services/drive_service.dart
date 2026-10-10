@@ -59,7 +59,7 @@ class DriveService {
       _listFiles(
         getHeaders,
         query: "mimeType contains 'audio/' and trashed = false",
-        fields: 'id, name, parents',
+        fields: 'id, name, parents, createdTime',
       ),
       _listFiles(
         getHeaders,
@@ -291,6 +291,7 @@ class DriveService {
         coverUri: ownCover ?? album?.coverUri,
         genre: songMeta?.genre ?? albumMeta?.genre,
         year: songMeta?.year ?? albumMeta?.year,
+        added: DateTime.tryParse((f['createdTime'] as String?) ?? ''),////////////////errrrrrorrrrrrrrrrr//////
       ));
     }
 

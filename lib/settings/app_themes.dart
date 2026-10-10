@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'app_fonts.dart';
+import 'theme_background.dart';
 
 /// Un tema completo que el usuario puede elegir.
 class AppThemeSpec {
@@ -9,6 +10,9 @@ class AppThemeSpec {
 
   /// Las pantallas son transparentes y dejan ver un fondo (imagen o degradado).
   final bool transparent;
+
+  /// Cómo se dibuja ese fondo (solo si el tema es transparente).
+  final ThemeBackground? background;
 
   /// Si se indican, al elegir este tema se aplican también esta fuente
   /// y este estilo de barra de progreso (el usuario puede cambiarlos después).
@@ -23,6 +27,7 @@ class AppThemeSpec {
     required this.name,
     required this.colorScheme,
     this.transparent = false,
+    this.background,
     this.fontId,
     this.progressStyleId,
     this.sharpCorners = false,
@@ -126,6 +131,13 @@ class AppThemes {
       name: 'Scene',
       fontId: 'pacifico',
       progressStyleId: 'rainbow',
+      transparent: true,
+      background: const ThemeBackground(
+        asset: 'assets/backgrounds/scene.png',
+        vignette: 0.55,
+        pattern: BackgroundPattern.checker,
+        patternOpacity: 0.06,
+      ),
       colorScheme: ColorScheme.fromSeed(
         seedColor: const Color(0xFFFF2BD6),
         brightness: Brightness.dark,

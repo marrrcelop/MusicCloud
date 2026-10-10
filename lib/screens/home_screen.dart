@@ -2,17 +2,20 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import '../models/album.dart';
 import '../models/library.dart';
+import '../models/library_view.dart';
 import '../models/song.dart';
 import '../services/app_error.dart';
 import '../services/auth_service.dart';
 import '../services/connectivity_service.dart';
 import '../services/cover_cache.dart';
 import '../services/library_repository.dart';
+import '../services/library_view_controller.dart';
 import '../services/permission_service.dart';
 import '../services/player_service.dart';
 import 'widgets/album_list.dart';
 import 'widgets/player_bar.dart';
 import 'widgets/song_list.dart';
+import 'widgets/sort_filter_sheet.dart';
 import 'album_screen.dart';
 import 'settings_screen.dart';
 
@@ -30,6 +33,8 @@ class _HomeScreenState extends State<HomeScreen> {
   final AuthService _auth = AuthService();
   final ConnectivityService _connectivity = ConnectivityService();
   final PermissionService _permissions = PermissionService();
+  final LibraryViewController _view = LibraryViewController();
+  final TextEditingController _searchController = TextEditingController();
   late final LibraryRepository _repo = LibraryRepository(
     auth: _auth,
     isOnline: () => _online,
@@ -43,6 +48,7 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _online = true;
   bool _playbackFailed = false;
   bool _askedNotifications = false;
+  bool _searching = false;
 
   /// Error de inicio de sesión (los de la biblioteca están en el repositorio).
   AppError? _authError;
@@ -52,22 +58,26 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
     // La caché de portadas necesita saber cómo pedir el token.
     CoverCache.instance.getHeaders = _auth.getHeaders;
-    _repo.addListener(_onRepoChanged);
+    _repo.addListener(_onModelChanged);
+    _view.addListener(_onModelChanged);
     _startListening();
     _bootstrap();
   }
 
   @override
   void dispose() {
-    _repo.removeListener(_onRepoChanged);
+    _repo.removeListener(_onModelChanged);
+    _view.removeListener(_onModelChanged);
     _repo.dispose();
+    _view.dispose();
+    _searchController.dispose();
     _connectionSub?.cancel();
     _playerErrorSub?.cancel();
     _player.dispose();
     super.dispose();
   }
 
-  void _onRepoChanged() {
+  void _onModelChanged() {
     if (mounted) setState(() {});
   }
 
@@ -129,6 +139,7 @@ class _HomeScreenState extends State<HomeScreen> {
   /// Al abrir: primero muestra lo guardado en el teléfono (al instante) y
   /// después inicia sesión y actualiza desde Drive por detrás.
   Future<void> _bootstrap() async {
+    await _view.loadPrefs();
     await _repo.loadSaved();
     await _tryAutoLogin();
   }
@@ -201,10 +212,13 @@ class _HomeScreenState extends State<HomeScreen> {
       debugPrint('Error al cerrar sesión: $e');
     }
     if (!mounted) return;
+    _searchController.clear();
+    _view.clearAll();
     setState(() {
       _authError = null;
       _signingIn = false;
       _playbackFailed = false;
+      _searching = false;
     });
   }
 
@@ -228,6 +242,34 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _retryLibrary() {
     return _auth.isSignedIn ? _refresh(interactive: false) : _tryAutoLogin();
+  }
+
+  // ---------- Búsqueda, orden y filtros ----------
+
+  void _startSearch() => setState(() => _searching = true);
+
+  void _stopSearch() {
+    _searchController.clear();
+    _view.setSearch('');
+    setState(() => _searching = false);
+  }
+
+  void _clearSearchText() {
+    _searchController.clear();
+    _view.setSearch('');
+  }
+
+  void _clearSearchAndFilters() {
+    _searchController.clear();
+    _view.clearAll();
+  }
+
+  void _openSortFilter(Library library) {
+    SortFilterSheet.show(
+      context,
+      controller: _view,
+      options: _view.optionsOf(library),
+    );
   }
 
   // ---------- Reproducción ----------
@@ -272,11 +314,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // ---------- Navegación ----------
 
-  void _openAlbum(Library library, Album album) {
+  void _openAlbum(LibraryView view, Album album) {
     Navigator.of(context).push(MaterialPageRoute<void>(
       builder: (_) => AlbumScreen(
         album: album,
-        songs: library.songsOf(album.id),
+        songs: view.songsOf(album.id),
         player: _player,
         onPlay: _play,
       ),
@@ -301,65 +343,132 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final busy = _repo.loading || _signingIn;
+    final library = _repo.library;
+    final view =
+        (_repo.hasSongs && library != null) ? _view.viewOf(library) : null;
 
-    return DefaultTabController(
-      length: 2,
-      child: Scaffold(
-        appBar: AppBar(
-          title: const Text('MusicCloud'),
-          actions: [
-            if (_auth.isSignedIn)
-              IconButton(
-                tooltip: 'Actualizar biblioteca',
-                icon: const Icon(Icons.refresh),
-                onPressed: busy ? null : () => _refresh(interactive: true),
-              ),
-            PopupMenuButton<_MenuAction>(
-              onSelected: _onMenuSelected,
-              itemBuilder: (context) {
-                final email = _auth.userEmail;
-                return <PopupMenuEntry<_MenuAction>>[
-                  if (email != null)
-                    PopupMenuItem<_MenuAction>(
-                      enabled: false,
-                      child: Text(email),
-                    ),
-                  const PopupMenuItem<_MenuAction>(
-                    value: _MenuAction.settings,
-                    child: Text('Personalización'),
-                  ),
-                  const PopupMenuItem<_MenuAction>(
-                    value: _MenuAction.notifications,
-                    child: Text('Ajustes de notificaciones'),
-                  ),
-                  if (_auth.isSignedIn)
-                    const PopupMenuItem<_MenuAction>(
-                      value: _MenuAction.signOut,
-                      child: Text('Cerrar sesión'),
-                    ),
-                ];
-              },
-            ),
-          ],
-          bottom: _repo.hasSongs
-              ? const TabBar(
-                  tabs: [
-                    Tab(text: 'Canciones'),
-                    Tab(text: 'Álbumes'),
-                  ],
-                )
-              : null,
+    return PopScope(
+      // Con la búsqueda abierta, "atrás" la cierra en vez de salir de la app.
+      canPop: !_searching,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _stopSearch();
+      },
+      child: DefaultTabController(
+        length: 2,
+        child: Scaffold(
+          appBar: _buildAppBar(busy, library, view),
+          body: Column(
+            children: [
+              if (!_online) _buildOfflineBanner(),
+              if (!_auth.isSignedIn && _repo.hasSongs && !busy)
+                _buildSessionBanner(),
+              if (_view.hasFilters) _buildActiveFilters(),
+              Expanded(child: _buildContent(view)),
+            ],
+          ),
+          bottomNavigationBar: PlayerBar(player: _player),
         ),
-        body: Column(
-          children: [
-            if (!_online) _buildOfflineBanner(),
-            if (!_auth.isSignedIn && _repo.hasSongs && !busy)
-              _buildSessionBanner(),
-            Expanded(child: _buildContent()),
-          ],
-        ),
-        bottomNavigationBar: PlayerBar(player: _player),
       ),
+    );
+  }
+
+  PreferredSizeWidget _buildAppBar(
+    bool busy,
+    Library? library,
+    LibraryView? view,
+  ) {
+    final tabs = view == null
+        ? null
+        : TabBar(
+            tabs: [
+              Tab(text: 'Canciones (${view.songs.length})'),
+              Tab(text: 'Álbumes (${view.albums.length})'),
+            ],
+          );
+
+    if (_searching) {
+      return AppBar(
+        leading: IconButton(
+          tooltip: 'Cerrar búsqueda',
+          icon: const Icon(Icons.arrow_back),
+          onPressed: _stopSearch,
+        ),
+        title: TextField(
+          controller: _searchController,
+          autofocus: true,
+          textInputAction: TextInputAction.search,
+          decoration: const InputDecoration(
+            hintText: 'Buscar canción, artista o álbum',
+            border: InputBorder.none,
+          ),
+          onChanged: _view.setSearch,
+        ),
+        actions: [
+          if (_searchController.text.isNotEmpty)
+            IconButton(
+              tooltip: 'Borrar',
+              icon: const Icon(Icons.close),
+              onPressed: _clearSearchText,
+            ),
+        ],
+        bottom: tabs,
+      );
+    }
+
+    return AppBar(
+      title: const Text('MusicCloud'),
+      actions: [
+        if (library != null && _repo.hasSongs) ...[
+          IconButton(
+            tooltip: 'Buscar',
+            icon: const Icon(Icons.search),
+            onPressed: _startSearch,
+          ),
+          IconButton(
+            tooltip: 'Ordenar y filtrar',
+            icon: Badge(
+              label: Text('${_view.filterCount}'),
+              isLabelVisible: _view.hasFilters,
+              child: const Icon(Icons.tune),
+            ),
+            onPressed: () => _openSortFilter(library),
+          ),
+        ],
+        if (_auth.isSignedIn)
+          IconButton(
+            tooltip: 'Actualizar biblioteca',
+            icon: const Icon(Icons.refresh),
+            onPressed: busy ? null : () => _refresh(interactive: true),
+          ),
+        _buildMenu(),
+      ],
+      bottom: tabs,
+    );
+  }
+
+  Widget _buildMenu() {
+    return PopupMenuButton<_MenuAction>(
+      onSelected: _onMenuSelected,
+      itemBuilder: (context) {
+        final email = _auth.userEmail;
+        return <PopupMenuEntry<_MenuAction>>[
+          if (email != null)
+            PopupMenuItem<_MenuAction>(enabled: false, child: Text(email)),
+          const PopupMenuItem<_MenuAction>(
+            value: _MenuAction.settings,
+            child: Text('Personalización'),
+          ),
+          const PopupMenuItem<_MenuAction>(
+            value: _MenuAction.notifications,
+            child: Text('Ajustes de notificaciones'),
+          ),
+          if (_auth.isSignedIn)
+            const PopupMenuItem<_MenuAction>(
+              value: _MenuAction.signOut,
+              child: Text('Cerrar sesión'),
+            ),
+        ];
+      },
     );
   }
 
@@ -400,9 +509,45 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildContent() {
-    final library = _repo.library;
-    if (_repo.hasSongs && library != null) return _buildLibrary(library);
+  /// Fila con los filtros activos; cada uno se quita con su X.
+  Widget _buildActiveFilters() {
+    Widget chip(String label, VoidCallback onDelete) => Padding(
+          padding: const EdgeInsets.only(right: 8),
+          child: Center(
+            child: InputChip(label: Text(label), onDeleted: onDelete),
+          ),
+        );
+
+    return SizedBox(
+      height: 48,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        children: [
+          if (_view.artist != null)
+            chip('Artista: ${_view.artist}', () => _view.setArtist(null)),
+          if (_view.genre != null)
+            chip('Género: ${_view.genre}', () => _view.setGenre(null)),
+          if (_view.year != null)
+            chip('Año: ${_view.year}', () => _view.setYear(null)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildContent(LibraryView? view) {
+    if (view != null) {
+      if (view.songs.isEmpty) {
+        return _buildMessage(
+          icon: Icons.search_off,
+          text: 'No hay canciones que coincidan con la búsqueda o los filtros.',
+          buttonLabel: 'Quitar búsqueda y filtros',
+          onPressed: _clearSearchAndFilters,
+        );
+      }
+      return _buildLibrary(view);
+    }
+
     if (_repo.loading || _signingIn) {
       return const Center(child: CircularProgressIndicator());
     }
@@ -435,22 +580,33 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildLibrary(Library library) {
+  Widget _buildLibrary(LibraryView view) {
     return Column(
       children: [
         if (_repo.loading || _signingIn) const LinearProgressIndicator(),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              'Orden: ${_view.order.label} · '
+              '${_view.ascending ? 'ascendente' : 'descendente'}',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ),
+        ),
         Expanded(
           child: TabBarView(
             children: [
               SongList(
                 player: _player,
-                songs: library.songs,
-                onTap: (index) => _play(library.songs, index),
+                songs: view.songs,
+                onTap: (index) => _play(view.songs, index),
               ),
               AlbumList(
-                albums: library.albums,
-                countOf: (album) => library.songsOf(album.id).length,
-                onTap: (album) => _openAlbum(library, album),
+                albums: view.albums,
+                countOf: (album) => view.songsOf(album.id).length,
+                onTap: (album) => _openAlbum(view, album),
               ),
             ],
           ),
