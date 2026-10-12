@@ -2,29 +2,112 @@ import 'package:flutter/material.dart';
 import '../models/album.dart';
 import '../models/library.dart';
 import '../models/song.dart';
+import '../services/library_repository.dart';
+import '../services/library_view_controller.dart';
 import '../services/player_service.dart';
 import 'widgets/album_cover.dart';
+import 'widgets/library_actions.dart';
 import 'widgets/player_bar.dart';
 import 'widgets/song_list.dart';
+import 'album_edit_screen.dart';
+
+enum _AlbumMenu { edit, trash }
 
 class AlbumScreen extends StatelessWidget {
-  final Album album;
-  final List<Song> songs;
+  final String albumId;
+  final LibraryRepository repo;
+  final LibraryViewController view;
   final PlayerService player;
   final Future<void> Function(List<Song> queue, int index) onPlay;
+  final LibraryActions actions;
 
   const AlbumScreen({
     super.key,
-    required this.album,
-    required this.songs,
+    required this.albumId,
+    required this.repo,
+    required this.view,
     required this.player,
     required this.onPlay,
+    required this.actions,
   });
+
+  void _popIfCurrent(BuildContext context) {
+    if (context.mounted && (ModalRoute.of(context)?.isCurrent ?? false)) {
+      Navigator.of(context).pop();
+    }
+  }
+
+  Future<void> _onMenu(
+    BuildContext context,
+    Album album,
+    _AlbumMenu action,
+  ) async {
+    switch (action) {
+      case _AlbumMenu.edit:
+        if (!actions.requireOnline()) return;
+        await Navigator.of(context).push(MaterialPageRoute<bool>(
+          builder: (_) => AlbumEditScreen(
+            album: album,
+            repo: repo,
+            actions: actions,
+          ),
+        ));
+      case _AlbumMenu.trash:
+        final deleted = await actions.trashAlbum(context, album);
+        if (deleted) _popIfCurrent(context);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: Listenable.merge([repo, view]),
+      builder: (context, _) {
+        final library = repo.library;
+        Album? album;
+        if (library != null) {
+          for (final a in library.albums) {
+            if (a.id == albumId) album = a;
+          }
+        }
+
+        if (library == null || album == null) {
+          // El álbum ya no existe (por ejemplo, se movió a la papelera): salimos.
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            _popIfCurrent(context);
+          });
+          return const Scaffold();
+        }
+
+        final songs = view.viewOf(library).songsOf(albumId);
+        return _buildScreen(context, album, songs);
+      },
+    );
+  }
+
+  Widget _buildScreen(BuildContext context, Album album, List<Song> songs) {
+    final editable = albumId != Library.noAlbumId;
+
     return Scaffold(
-      appBar: AppBar(title: Text(album.name)),
+      appBar: AppBar(
+        title: Text(album.name),
+        actions: [
+          if (editable)
+            PopupMenuButton<_AlbumMenu>(
+              onSelected: (action) => _onMenu(context, album, action),
+              itemBuilder: (_) => const [
+                PopupMenuItem(
+                  value: _AlbumMenu.edit,
+                  child: Text('Editar álbum'),
+                ),
+                PopupMenuItem(
+                  value: _AlbumMenu.trash,
+                  child: Text('Mover a la papelera'),
+                ),
+              ],
+            ),
+        ],
+      ),
       body: Column(
         children: [
           Padding(
@@ -65,11 +148,19 @@ class AlbumScreen extends StatelessWidget {
           ),
           const Divider(height: 1),
           Expanded(
-            child: SongList(
-              player: player,
-              songs: songs,
-              onTap: (index) => onPlay(songs, index),
-            ),
+            child: songs.isEmpty
+                ? const Center(
+                    child: Text(
+                      'Ninguna canción coincide con la búsqueda o los filtros.',
+                    ),
+                  )
+                : SongList(
+                    player: player,
+                    songs: songs,
+                    onTap: (index) => onPlay(songs, index),
+                    onAction: (song, action) =>
+                        actions.handleSong(context, song, action),
+                  ),
           ),
         ],
       ),

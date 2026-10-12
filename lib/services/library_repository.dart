@@ -1,9 +1,14 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
+import '../models/album.dart';
+import '../models/album_meta_editor.dart';
 import '../models/library.dart';
+import '../models/song.dart';
 import 'app_error.dart';
 import 'auth_service.dart';
 import 'drive_service.dart';
+import 'image_tools.dart';
 import 'library_cache.dart';
 
 enum RefreshStatus {
@@ -31,8 +36,7 @@ class RefreshResult {
 ///
 /// Las pantallas solo piden "dame la biblioteca" ([library]) y "actualiza"
 /// ([refresh]); no saben si los datos vienen de Drive o de lo guardado en el
-/// teléfono. Si algún día se cambia el almacenamiento (por ejemplo, a una base
-/// de datos), el cambio se hace aquí y en [LibraryCache], no en las pantallas.
+/// teléfono. También concentra las ediciones y borrados.
 class LibraryRepository extends ChangeNotifier {
   final AuthService _auth;
   final DriveService _drive;
@@ -140,6 +144,194 @@ class LibraryRepository extends ChangeNotifier {
     _error = null;
     _upToDate = false;
     notifyListeners();
+  }
+
+  // ---------- Edición y borrado ----------
+  //
+  // Estas operaciones SÍ lanzan errores (la pantalla los muestra). Al terminar
+  // vuelven a leer Drive para mostrar el estado real.
+
+  /// Guarda los datos de una canción en el album.json de su carpeta.
+  Future<RefreshResult> saveSong(
+    Song song, {
+    required String title,
+    required String artist,
+    required String genre,
+    required int? year,
+  }) async {
+    final albumId = song.albumId;
+    final fileName = song.fileName;
+    if (albumId == null || fileName == null) {
+      throw StateError('La canción no está dentro de una carpeta.');
+    }
+
+    // Solo escribimos lo que cambió. Vaciar un campo borra el dato propio de la
+    // canción y vuelve a valer el del álbum (o el nombre del archivo).
+    final fields = <String, Object?>{};
+    if (title.trim() != song.title) fields['title'] = _orNull(title);
+    final currentArtist = song.artist == Song.unknownArtist ? '' : song.artist;
+    if (artist.trim() != currentArtist) fields['artist'] = _orNull(artist);
+    if (genre.trim() != (song.genre ?? '')) fields['genre'] = _orNull(genre);
+    if (year != song.year) fields['year'] = year;
+    if (fields.isEmpty) return const RefreshResult(RefreshStatus.ok);
+
+    Object? failure;
+    try {
+      await _updateAlbumJson(albumId, songFileName: fileName, song: fields);
+    } catch (e) {
+      failure = e;
+    }
+    return _finishWrite(failure);
+  }
+
+  /// Guarda los datos de un álbum: nombre, artista, año, género y portada.
+  Future<RefreshResult> saveAlbum(
+    Album album, {
+    required String name,
+    required String artist,
+    required String genre,
+    required int? year,
+    PreparedImage? cover,
+  }) async {
+    Object? failure;
+    try {
+      // 1) Datos (primero, porque es lo que más puede fallar sin haber cambiado nada).
+      final fields = <String, Object?>{};
+      if (artist.trim() != (album.artist ?? '')) fields['artist'] = _orNull(artist);
+      if (genre.trim() != (album.genre ?? '')) fields['genre'] = _orNull(genre);
+      if (year != album.year) fields['year'] = year;
+      if (fields.isNotEmpty) await _updateAlbumJson(album.id, album: fields);
+
+      // 2) Nombre (el nombre de la carpeta).
+      final newName = name.trim();
+      if (newName.isNotEmpty && newName != album.name) {
+        await _drive.renameFile(_auth.getHeaders, album.id, newName);
+      }
+
+      // 3) Portada: se sube la nueva y recién entonces se retira la anterior.
+      if (cover != null) {
+        await _drive.createFile(
+          _auth.getHeaders,
+          name: 'cover.${cover.extension}',
+          parentId: album.id,
+          mimeType: cover.mimeType,
+          bytes: cover.bytes,
+        );
+        final oldId = _coverFileId(album.coverUri);
+        if (oldId != null) {
+          try {
+            await _drive.trashFile(_auth.getHeaders, oldId);
+          } catch (e) {
+            debugPrint('No se pudo retirar la portada anterior: $e');
+          }
+        }
+      }
+    } catch (e) {
+      failure = e;
+    }
+    return _finishWrite(failure);
+  }
+
+  /// Mueve una canción a la papelera de Drive.
+  Future<RefreshResult> trashSong(Song song) async {
+    Object? failure;
+    try {
+      await _drive.trashFile(_auth.getHeaders, song.id);
+    } catch (e) {
+      failure = e;
+    }
+    return _finishWrite(failure);
+  }
+
+  /// Mueve una carpeta (álbum) completa a la papelera de Drive.
+  Future<RefreshResult> trashAlbum(Album album) async {
+    Object? failure;
+    try {
+      await _drive.trashFile(_auth.getHeaders, album.id);
+    } catch (e) {
+      failure = e;
+    }
+    return _finishWrite(failure);
+  }
+
+  /// Vuelve a leer Drive; si algo falló antes, lanza el error después de actualizar.
+  Future<RefreshResult> _finishWrite(Object? failure) async {
+    // Si justo se está actualizando, esperamos a que termine.
+    for (var i = 0; i < 50 && _loading; i++) {
+      await Future.delayed(const Duration(milliseconds: 200));
+    }
+    final result = await refresh();
+    if (failure != null) throw failure;
+    return result;
+  }
+
+  /// Lee el album.json de una carpeta, le aplica los cambios y lo guarda.
+  /// Si no existe, lo crea. Si el actual está mal escrito, no toca nada.
+  Future<void> _updateAlbumJson(
+    String albumId, {
+    Map<String, Object?> album = const {},
+    String? songFileName,
+    Map<String, Object?> song = const {},
+  }) async {
+    final fileId = _metaFileIdFor(albumId);
+    String? current;
+    var exists = false;
+
+    if (fileId != null) {
+      try {
+        // Se descarga la versión actual (no la guardada), por si cambió en Drive.
+        final raw = await _drive.downloadBytes(_auth.getHeaders, fileId);
+        current = utf8.decode(raw, allowMalformed: true);
+        exists = true;
+      } on DriveException catch (e) {
+        if (e.statusCode != 404) rethrow; // si ya no existe, se crea uno nuevo
+      }
+    }
+
+    final text = AlbumMetaEditor.apply(
+      current,
+      album: album,
+      songFileName: songFileName,
+      song: song,
+    );
+    final bytes = Uint8List.fromList(utf8.encode(text));
+
+    if (exists && fileId != null) {
+      await _drive.updateContent(
+        _auth.getHeaders,
+        fileId,
+        bytes,
+        'application/json',
+      );
+    } else {
+      await _drive.createFile(
+        _auth.getHeaders,
+        name: 'album.json',
+        parentId: albumId,
+        mimeType: 'application/json',
+        bytes: bytes,
+      );
+    }
+  }
+
+  /// Id del album.json de una carpeta, si se conoce.
+  String? _metaFileIdFor(String albumId) {
+    for (final entry in _metas.entries) {
+      if (entry.value.parent == albumId) return entry.key;
+    }
+    return null;
+  }
+
+  /// Id del archivo de una portada ("drive:ID:VERSIÓN").
+  String? _coverFileId(String? uri) {
+    if (uri == null || !uri.startsWith('drive:')) return null;
+    final parts = uri.split(':');
+    return parts.length >= 3 ? parts[1] : null;
+  }
+
+  String? _orNull(String value) {
+    final text = value.trim();
+    return text.isEmpty ? null : text;
   }
 
   @override

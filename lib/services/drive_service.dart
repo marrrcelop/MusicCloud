@@ -12,6 +12,7 @@ import '../models/song.dart';
 import 'app_error.dart';
 import 'drive_audio_source.dart';
 import 'library_cache.dart';
+import 'dart:typed_data';
 
 /// Resultado de leer Drive: la biblioteca y los album.json conocidos.
 class LibraryResult {
@@ -425,6 +426,126 @@ class DriveService {
     }
     return response;
   }
+  // ---------- Escritura (editar, subir, mover a la papelera) ----------
+
+  static const _uploadTimeout = Duration(seconds: 60);
+
+  Uri _fileUri(String id) =>
+      Uri.https('www.googleapis.com', '/drive/v3/files/$id');
+
+  /// Cambia el nombre de un archivo o carpeta.
+  Future<void> renameFile(
+    HeadersProvider getHeaders,
+    String id,
+    String name,
+  ) async {
+    await _request(getHeaders, 'PATCH', _fileUri(id), json: {'name': name});
+  }
+
+  /// Mueve un archivo o carpeta a la papelera de Drive (se puede recuperar).
+  Future<void> trashFile(HeadersProvider getHeaders, String id) async {
+    await _request(getHeaders, 'PATCH', _fileUri(id), json: {'trashed': true});
+  }
+
+  /// Reemplaza el contenido de un archivo que ya existe.
+  Future<void> updateContent(
+    HeadersProvider getHeaders,
+    String id,
+    Uint8List bytes,
+    String mimeType,
+  ) async {
+    await _request(
+      getHeaders,
+      'PATCH',
+      Uri.https('www.googleapis.com', '/upload/drive/v3/files/$id', {
+        'uploadType': 'media',
+      }),
+      bytes: bytes,
+      contentType: mimeType,
+    );
+  }
+
+  /// Crea un archivo nuevo dentro de una carpeta y devuelve su id.
+  Future<String> createFile(
+    HeadersProvider getHeaders, {
+    required String name,
+    required String parentId,
+    required String mimeType,
+    required Uint8List bytes,
+  }) async {
+    // Una sola petición con los datos del archivo y su contenido.
+    final boundary = 'musiccloud${DateTime.now().microsecondsSinceEpoch}';
+    final metadata = jsonEncode({
+      'name': name,
+      'parents': [parentId],
+    });
+    final body = BytesBuilder()
+      ..add(utf8.encode(
+        '--$boundary\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n'
+        '$metadata\r\n',
+      ))
+      ..add(utf8.encode('--$boundary\r\nContent-Type: $mimeType\r\n\r\n'))
+      ..add(bytes)
+      ..add(utf8.encode('\r\n--$boundary--'));
+
+    final response = await _request(
+      getHeaders,
+      'POST',
+      Uri.https('www.googleapis.com', '/upload/drive/v3/files', {
+        'uploadType': 'multipart',
+        'fields': 'id',
+      }),
+      bytes: body.takeBytes(),
+      contentType: 'multipart/related; boundary=$boundary',
+    );
+    final data = jsonDecode(utf8.decode(response.bodyBytes));
+    return (data as Map<String, dynamic>)['id'] as String;
+  }
+
+  /// Petición que modifica algo en Drive. Renueva el token si venció.
+  /// No se reintenta sola: repetir una creación podría duplicar archivos.
+  Future<http.Response> _request(
+    HeadersProvider getHeaders,
+    String method,
+    Uri uri, {
+    Object? json,
+    Uint8List? bytes,
+    String? contentType,
+  }) async {
+    Future<http.Response> send(Map<String, String> auth) async {
+      final request = http.Request(method, uri)..headers.addAll(auth);
+      if (json != null) {
+        request.headers['Content-Type'] = 'application/json; charset=UTF-8';
+        request.body = jsonEncode(json);
+      } else if (bytes != null) {
+        if (contentType != null) request.headers['Content-Type'] = contentType;
+        request.bodyBytes = bytes;
+      }
+      final streamed = await _client.send(request).timeout(_uploadTimeout);
+      return http.Response.fromStream(streamed);
+    }
+
+    var headers = await getHeaders();
+    if (headers == null) throw const SessionException();
+    var response = await send(headers);
+
+    if (response.statusCode == 401) {
+      headers = await getHeaders(forceRefresh: true);
+      if (headers == null) throw const SessionException();
+      response = await send(headers);
+    }
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      debugPrint(
+        'Drive respondió ${response.statusCode} a $method ${uri.path}: '
+        '${response.body}',
+      );
+      throw DriveException(response.statusCode);
+    }
+    return response;
+  }
+
+
 
   // ---------- Utilidades ----------
 

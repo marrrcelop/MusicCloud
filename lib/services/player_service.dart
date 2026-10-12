@@ -1,15 +1,15 @@
 import 'dart:async';
+import 'package:audio_service/audio_service.dart';
 import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
-import 'package:just_audio_background/just_audio_background.dart';
-import '../models/song.dart';
+import '../../models/song.dart';
+import 'audio_handler.dart';
 import 'drive_audio_source.dart';
 
 class PlayerService {
-  final AndroidLoudnessEnhancer _loudness = AndroidLoudnessEnhancer();
-  late final AudioPlayer _player = AudioPlayer(
-    audioPipeline: AudioPipeline(androidAudioEffects: [_loudness]),
-  );
+  final AudioPlayer _player;
+  final AndroidLoudnessEnhancer _loudness;
+  final MusicAudioHandler _handler;
 
   List<Song> _queue = [];
   HeadersProvider? _getDriveHeaders;
@@ -19,7 +19,9 @@ class PlayerService {
       StreamController<Song?>.broadcast();
   Song? _current;
 
-  PlayerService() {
+  PlayerService._(this._player, this._loudness, this._handler) {
+    _handler.onClose = close;
+
     _player.playbackEventStream.listen(
       (_) {},
       onError: (Object error, StackTrace stackTrace) {
@@ -35,6 +37,23 @@ class PlayerService {
     });
   }
 
+  /// Crea el reproductor y lo conecta con la notificación. Se llama una vez, al iniciar la app.
+  static Future<PlayerService> create() async {
+    final loudness = AndroidLoudnessEnhancer();
+    final player = AudioPlayer(
+      audioPipeline: AudioPipeline(androidAudioEffects: [loudness]),
+    );
+    final handler = await AudioService.init(
+      builder: () => MusicAudioHandler(player),
+      config: const AudioServiceConfig(
+        androidNotificationChannelId: 'com.musiccloud.channel.audio',
+        androidNotificationChannelName: 'Reproducción de música',
+        androidNotificationOngoing: true,
+      ),
+    );
+    return PlayerService._(player, loudness, handler);
+  }
+
   void _setCurrent(Song? song) {
     if (song == _current) return;
     _current = song;
@@ -48,6 +67,8 @@ class PlayerService {
   Stream<double> get volumeStream => _player.volumeStream;
   Stream<bool> get shuffleStream => _player.shuffleModeEnabledStream;
   Stream<double> get boostStream => _loudness.targetGainStream;
+
+  /// La canción que suena ahora mismo (o null si no hay ninguna).
   Song? get currentSong => _current;
 
   /// Canción actual. Entrega primero el valor de ahora y luego los cambios.
@@ -63,6 +84,7 @@ class PlayerService {
   }) async {
     _queue = songs;
     _getDriveHeaders = getDriveHeaders;
+    _handler.setItems([for (final s in songs) _mediaItem(s)]);
     try {
       await _player.setAudioSources(
         songs.map((s) => _toSource(s, getDriveHeaders)).toList(),
@@ -97,6 +119,7 @@ class PlayerService {
   Future<void> close() async {
     _queue = [];
     _getDriveHeaders = null;
+    _handler.setItems(const []);
     _setCurrent(null);
     try {
       await _player.pause();
@@ -104,37 +127,30 @@ class PlayerService {
     } catch (e) {
       debugPrint('Error al detener el reproductor: $e');
     }
+    await _handler.idle();
   }
 
-  AudioSource _toSource(Song song, HeadersProvider getDriveHeaders) {
-    final tag = MediaItem(
-      id: song.id,
-      title: song.title,
-      artist: song.artist,
-      artUri: song.coverUri == null ? null : Uri.parse(song.coverUri!),
-    );
+  MediaItem _mediaItem(Song song) => MediaItem(
+        id: song.id,
+        title: song.title,
+        artist: song.artist,
+        album: song.albumName,
+      );
 
+  AudioSource _toSource(Song song, HeadersProvider getDriveHeaders) {
     switch (song.source) {
       case SongSource.drive:
         return DriveAudioSource(
           fileId: song.path,
           getHeaders: getDriveHeaders,
-          tag: tag,
         );
       case SongSource.local:
-        return AudioSource.uri(Uri.parse(song.path), tag: tag);
+        return AudioSource.uri(Uri.parse(song.path));
     }
   }
 
-  Future<void> next() => _player.seekToNext();
-  Future<void> previous() async {
-    final pastStart = _player.position > const Duration(seconds: 3);
-    if (pastStart || !_player.hasPrevious) {
-      await _player.seek(Duration.zero);
-    } else {
-      await _player.seekToPrevious();
-    }
-  }
+  Future<void> next() => _handler.skipToNext();
+  Future<void> previous() => _handler.skipToPrevious();
 
   Future<void> setShuffle(bool enabled) async {
     if (enabled) await _player.shuffle();

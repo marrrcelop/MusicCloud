@@ -1,7 +1,7 @@
 import 'package:google_sign_in/google_sign_in.dart';
 
 class AuthService {
-  static const _scopes = ['https://www.googleapis.com/auth/drive.readonly'];
+   static const _scopes = ['https://www.googleapis.com/auth/drive'];
 
   // Pega aquí el ID de cliente de tipo "Aplicación web"
   static const _serverClientId = '970424544525-e1v130ejth35a5kfe7ujiitdo14m935v.apps.googleusercontent.com';

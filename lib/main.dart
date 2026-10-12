@@ -1,7 +1,7 @@
 import 'dart:ui' show PlatformDispatcher;
 import 'package:flutter/material.dart';
-import 'package:just_audio_background/just_audio_background.dart';
 import 'screens/home_screen.dart';
+import 'services/player_service.dart';
 import 'settings/app_fonts.dart';
 import 'settings/app_themes.dart';
 import 'settings/settings_controller.dart';
@@ -24,20 +24,20 @@ Future<void> main() async {
     return true; // true = ya lo manejamos, no cierres la app
   };
 
-  await JustAudioBackground.init(
-    androidNotificationChannelId: 'com.musiccloud.channel.audio',
-    androidNotificationChannelName: 'Reproducción de música',
-    androidNotificationOngoing: true,
-  );
-
+  final player = await PlayerService.create();
   final settings = await SettingsController.load();
-  runApp(MusicCloudApp(settings: settings));
+  runApp(MusicCloudApp(settings: settings, player: player));
 }
 
 class MusicCloudApp extends StatelessWidget {
   final SettingsController settings;
+  final PlayerService player;
 
-  const MusicCloudApp({super.key, required this.settings});
+  const MusicCloudApp({
+    super.key,
+    required this.settings,
+    required this.player,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -61,7 +61,7 @@ class MusicCloudApp extends StatelessWidget {
                 ],
               );
             },
-            home: const HomeScreen(),
+            home: HomeScreen(player: player),
           );
         },
       ),

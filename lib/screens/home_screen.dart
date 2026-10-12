@@ -18,18 +18,21 @@ import 'widgets/song_list.dart';
 import 'widgets/sort_filter_sheet.dart';
 import 'album_screen.dart';
 import 'settings_screen.dart';
+import '../screens/widgets/library_actions.dart';
 
 enum _MenuAction { settings, notifications, signOut }
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+  final PlayerService player;
+
+  const HomeScreen({super.key, required this.player});
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  final PlayerService _player = PlayerService();
+    PlayerService get _player => widget.player;
   final AuthService _auth = AuthService();
   final ConnectivityService _connectivity = ConnectivityService();
   final PermissionService _permissions = PermissionService();
@@ -38,6 +41,12 @@ class _HomeScreenState extends State<HomeScreen> {
   late final LibraryRepository _repo = LibraryRepository(
     auth: _auth,
     isOnline: () => _online,
+  );
+   late final LibraryActions _actions = LibraryActions(
+    repo: _repo,
+    player: _player,
+    isOnline: () => _online,
+    notify: _showError,
   );
 
   StreamSubscription<bool>? _connectionSub;
@@ -73,7 +82,6 @@ class _HomeScreenState extends State<HomeScreen> {
     _searchController.dispose();
     _connectionSub?.cancel();
     _playerErrorSub?.cancel();
-    _player.dispose();
     super.dispose();
   }
 
@@ -314,13 +322,15 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // ---------- Navegación ----------
 
-  void _openAlbum(LibraryView view, Album album) {
+  void _openAlbum(Album album) {
     Navigator.of(context).push(MaterialPageRoute<void>(
       builder: (_) => AlbumScreen(
-        album: album,
-        songs: view.songsOf(album.id),
+        albumId: album.id,
+        repo: _repo,
+        view: _view,
         player: _player,
         onPlay: _play,
+        actions: _actions,
       ),
     ));
   }
@@ -598,15 +608,17 @@ class _HomeScreenState extends State<HomeScreen> {
         Expanded(
           child: TabBarView(
             children: [
-              SongList(
+                  SongList(
                 player: _player,
                 songs: view.songs,
                 onTap: (index) => _play(view.songs, index),
+                onAction: (song, action) =>
+                    _actions.handleSong(context, song, action),
               ),
-              AlbumList(
+               AlbumList(
                 albums: view.albums,
                 countOf: (album) => view.songsOf(album.id).length,
-                onTap: (album) => _openAlbum(view, album),
+                onTap: (album) => _openAlbum(album),
               ),
             ],
           ),
