@@ -19,6 +19,7 @@ class AlbumScreen extends StatelessWidget {
   final LibraryViewController view;
   final PlayerService player;
   final Future<void> Function(List<Song> queue, int index) onPlay;
+  final Future<void> Function(List<Song> queue) onShuffle;
   final LibraryActions actions;
 
   const AlbumScreen({
@@ -28,6 +29,7 @@ class AlbumScreen extends StatelessWidget {
     required this.view,
     required this.player,
     required this.onPlay,
+    required this.onShuffle,
     required this.actions,
   });
 
@@ -134,11 +136,22 @@ class AlbumScreen extends StatelessWidget {
                           overflow: TextOverflow.ellipsis,
                         ),
                       const SizedBox(height: 8),
-                      FilledButton.icon(
-                        icon: const Icon(Icons.play_arrow),
-                        label: const Text('Reproducir'),
-                        onPressed:
-                            songs.isEmpty ? null : () => onPlay(songs, 0),
+                                      Wrap(
+                        spacing: 8,
+                        children: [
+                          FilledButton.icon(
+                            icon: const Icon(Icons.play_arrow),
+                            label: const Text('Reproducir'),
+                            onPressed:
+                                songs.isEmpty ? null : () => onPlay(songs, 0),
+                          ),
+                          OutlinedButton.icon(
+                            icon: const Icon(Icons.shuffle),
+                            label: const Text('Aleatorio'),
+                            onPressed:
+                                songs.isEmpty ? null : () => onShuffle(songs),
+                          ),
+                        ],
                       ),
                     ],
                   ),

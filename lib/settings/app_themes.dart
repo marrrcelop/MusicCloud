@@ -97,6 +97,15 @@ class AppThemes {
       fontId: 'special_elite',
       progressStyleId: 'thick',
       sharpCorners: true,
+      transparent: true,
+      background: const ThemeBackground(
+        // asset: 'assets/backgrounds/grunge.png', // imagen por defecto (opcional)
+        gradient: [Color(0xFF0F0D0B), Color(0xFF3A2A1E)],
+        vignette: 0.65,
+        pattern: BackgroundPattern.grain,
+        patternColor: Color(0xFFDDD5C5),
+        patternOpacity: 0.10,
+      ),
       colorScheme: ColorScheme.fromSeed(
         seedColor: const Color(0xFF8A4B2A),
         brightness: Brightness.dark,
@@ -114,6 +123,16 @@ class AppThemes {
       name: 'Emo',
       fontId: 'permanent_marker',
       progressStyleId: 'classic',
+      transparent: true,
+      background: const ThemeBackground(
+        // asset: 'assets/backgrounds/emo.png', // imagen por defecto (opcional)
+        gradient: [Color(0xFF05030A), Color(0xFF3B0A2A)],
+        vignette: 0.6,
+        pattern: BackgroundPattern.stripes,
+        patternColor: Color(0xFFFF2D75),
+        patternOpacity: 0.07,
+        patternCell: 18,
+      ),
       colorScheme: ColorScheme.fromSeed(
         seedColor: const Color(0xFFD81B60),
         brightness: Brightness.dark,

@@ -18,6 +18,9 @@ class SettingsController extends ChangeNotifier {
   static const _kMascotDx = 'mascot_dx';
   static const _kMascotDy = 'mascot_dy';
   static const _kSpritePath = 'sprite_path';
+  static const _kAlbumGrid = 'album_grid';
+
+  // Claves antiguas (un solo fondo para todos los temas). Se migran al abrir.
   static const _kBackgroundPath = 'background_path';
   static const _kBackgroundDim = 'background_dim';
 
@@ -36,8 +39,7 @@ class SettingsController extends ChangeNotifier {
   late double _mascotDx;
   late double _mascotDy;
   String? _spritePath;
-  String? _backgroundPath;
-  late double _backgroundDim;
+  late bool _albumGrid;
 
   SettingsController._(this._prefs) {
     _themeId = _prefs.getString(_kTheme) ?? AppThemes.defaultId;
@@ -49,8 +51,8 @@ class SettingsController extends ChangeNotifier {
     _mascotDx = _prefs.getDouble(_kMascotDx) ?? defaultMascotDx;
     _mascotDy = _prefs.getDouble(_kMascotDy) ?? defaultMascotDy;
     _spritePath = _prefs.getString(_kSpritePath);
-    _backgroundPath = _prefs.getString(_kBackgroundPath);
-    _backgroundDim = _prefs.getDouble(_kBackgroundDim) ?? 0.45;
+    _albumGrid = _prefs.getBool(_kAlbumGrid) ?? true;
+    _migrateLegacyBackground();
   }
 
   static Future<SettingsController> load() async {
@@ -67,8 +69,7 @@ class SettingsController extends ChangeNotifier {
   double get mascotDx => _mascotDx;
   double get mascotDy => _mascotDy;
   String? get spritePath => _spritePath;
-  String? get backgroundPath => _backgroundPath;
-  double get backgroundDim => _backgroundDim;
+  bool get albumGrid => _albumGrid;
 
   // ---------- Tema, fuente y barra ----------
 
@@ -103,28 +104,63 @@ class SettingsController extends ChangeNotifier {
     await _prefs.setString(_kProgress, id);
   }
 
-  // ---------- Fondo (temas transparentes) ----------
+  // ---------- Álbumes ----------
+
+  Future<void> setAlbumGrid(bool value) async {
+    _albumGrid = value;
+    notifyListeners();
+    await _prefs.setBool(_kAlbumGrid, value);
+  }
+
+  // ---------- Fondo (cada tema guarda el suyo) ----------
+
+  String _bgKey(String themeId) => 'background_path.$themeId';
+  String _dimKey(String themeId) => 'background_dim.$themeId';
+
+  /// Imagen de fondo que el usuario eligió para el tema actual.
+  String? get backgroundPath => _prefs.getString(_bgKey(_themeId));
+
+  /// Oscurecido del fondo del tema actual.
+  double get backgroundDim =>
+      _prefs.getDouble(_dimKey(_themeId)) ??
+      AppThemes.byId(_themeId).background?.defaultDim ??
+      0.45;
+
+  /// Hasta ahora había un solo fondo para todos los temas: pasa a ser el del
+  /// tema que está activo.
+  void _migrateLegacyBackground() {
+    final legacyPath = _prefs.getString(_kBackgroundPath);
+    if (legacyPath != null) {
+      _prefs.setString(_bgKey(_themeId), legacyPath);
+      _prefs.remove(_kBackgroundPath);
+    }
+    final legacyDim = _prefs.getDouble(_kBackgroundDim);
+    if (legacyDim != null) {
+      _prefs.setDouble(_dimKey(_themeId), legacyDim);
+      _prefs.remove(_kBackgroundDim);
+    }
+  }
 
   Future<bool> pickBackground() async {
-    final path = await _importImage('background', _backgroundPath);
+    final key = _bgKey(_themeId);
+    final path = await _importImage('background', _prefs.getString(key));
     if (path == null) return false;
-    _backgroundPath = path;
+    await _prefs.setString(key, path);
     notifyListeners();
-    await _prefs.setString(_kBackgroundPath, path);
     return true;
   }
 
   Future<void> clearBackground() async {
-    await _deleteFile(_backgroundPath);
-    _backgroundPath = null;
+    final key = _bgKey(_themeId);
+    await _deleteFile(_prefs.getString(key));
+    await _prefs.remove(key);
     notifyListeners();
-    await _prefs.remove(_kBackgroundPath);
   }
 
   Future<void> setBackgroundDim(double value) async {
-    _backgroundDim = value;
+    final key = _dimKey(_themeId);
+    await _prefs.setDouble(key, value);
     notifyListeners();
-    await _prefs.setDouble(_kBackgroundDim, value);
   }
 
   // ---------- Mascota ----------

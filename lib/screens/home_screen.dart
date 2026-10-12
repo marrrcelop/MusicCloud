@@ -19,6 +19,9 @@ import 'widgets/sort_filter_sheet.dart';
 import 'album_screen.dart';
 import 'settings_screen.dart';
 import '../screens/widgets/library_actions.dart';
+import '../settings/settings_scope.dart';
+import 'widgets/album_grid.dart';
+import 'dart:math' as math;
 
 enum _MenuAction { settings, notifications, signOut }
 
@@ -309,6 +312,14 @@ class _HomeScreenState extends State<HomeScreen> {
       _showError(_toAppError(e).message, retry: true);
     }
   }
+    Future<void> _playShuffled(List<Song> queue) async {
+    if (queue.isEmpty) return;
+    final start = math.Random().nextInt(queue.length);
+    await _play(queue, start);
+    await _player.setShuffle(true);
+  }
+
+
 
   Future<void> _retryPlayback() async {
     try {
@@ -330,6 +341,7 @@ class _HomeScreenState extends State<HomeScreen> {
         view: _view,
         player: _player,
         onPlay: _play,
+        onShuffle: _playShuffled,
         actions: _actions,
       ),
     ));
@@ -590,7 +602,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildLibrary(LibraryView view) {
+    Widget _buildLibrary(LibraryView view) {
     return Column(
       children: [
         if (_repo.loading || _signingIn) const LinearProgressIndicator(),
@@ -608,20 +620,58 @@ class _HomeScreenState extends State<HomeScreen> {
         Expanded(
           child: TabBarView(
             children: [
-                  SongList(
+              SongList(
                 player: _player,
                 songs: view.songs,
                 onTap: (index) => _play(view.songs, index),
                 onAction: (song, action) =>
                     _actions.handleSong(context, song, action),
               ),
-               AlbumList(
-                albums: view.albums,
-                countOf: (album) => view.songsOf(album.id).length,
-                onTap: (album) => _openAlbum(album),
+              _buildAlbums(view),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+    Widget _buildAlbums(LibraryView view) {
+    final settings = SettingsScope.of(context);
+    final grid = settings.albumGrid;
+    final count = view.albums.length;
+    int countOf(Album album) => view.songsOf(album.id).length;
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 4, 0),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  count == 1 ? '1 álbum' : '$count álbumes',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ),
+              IconButton(
+                tooltip: grid ? 'Ver como lista' : 'Ver como cuadrícula',
+                icon: Icon(grid ? Icons.view_list : Icons.grid_view),
+                onPressed: () => settings.setAlbumGrid(!grid),
               ),
             ],
           ),
+        ),
+        Expanded(
+          child: grid
+              ? AlbumGrid(
+                  albums: view.albums,
+                  countOf: countOf,
+                  onTap: _openAlbum,
+                )
+              : AlbumList(
+                  albums: view.albums,
+                  countOf: countOf,
+                  onTap: _openAlbum,
+                ),
         ),
       ],
     );

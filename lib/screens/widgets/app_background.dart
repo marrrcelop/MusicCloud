@@ -1,5 +1,6 @@
 import 'dart:io';
-import 'dart:ui' show ImageFilter;
+import 'dart:math' as math;
+import 'dart:ui' show ImageFilter, PointMode;
 import 'package:flutter/material.dart';
 import '../../settings/app_themes.dart';
 import '../../settings/settings_scope.dart';
@@ -20,11 +21,15 @@ class AppBackground extends StatelessWidget {
     final media = MediaQuery.of(context);
     final px = (media.size.width * media.devicePixelRatio).round();
 
-    // La imagen del usuario, si eligió una; si no, la propia del tema.
+    // La imagen del usuario (de este tema), si eligió una; si no, la propia del tema.
     final userPath = settings.backgroundPath;
     final ImageProvider? provider = userPath != null
         ? ResizeImage(FileImage(File(userPath)), width: px)
         : (spec.asset != null ? AssetImage(spec.asset!) : null);
+
+    final gradientColors =
+        spec.gradient ?? [const Color(0xFF12081F), scheme.primaryContainer];
+    final patternPainter = _patternPainter(spec);
 
     return Positioned.fill(
       child: Stack(
@@ -36,20 +41,14 @@ class AppBackground extends StatelessWidget {
               gradient: LinearGradient(
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
-                colors: [const Color(0xFF12081F), scheme.primaryContainer],
+                colors: gradientColors,
               ),
             ),
           ),
           // Capa 2: imagen, con tinte y desenfoque si el tema los pide.
           if (provider != null) _image(provider, spec),
           // Capa 3: patrón.
-          if (spec.pattern == BackgroundPattern.checker)
-            CustomPaint(
-              painter: _CheckerPainter(
-                color: Colors.white.withValues(alpha: spec.patternOpacity),
-                cell: spec.patternCell,
-              ),
-            ),
+          if (patternPainter != null) CustomPaint(painter: patternPainter),
           // Capa 4: viñeta (bordes oscuros).
           if (spec.vignette > 0)
             DecoratedBox(
@@ -98,6 +97,23 @@ class AppBackground extends StatelessWidget {
     }
     return image;
   }
+
+  CustomPainter? _patternPainter(ThemeBackground spec) {
+    final color = spec.patternColor.withValues(alpha: spec.patternOpacity);
+    switch (spec.pattern) {
+      case BackgroundPattern.none:
+        return null;
+      case BackgroundPattern.checker:
+        return _CheckerPainter(color: color, cell: spec.patternCell);
+      case BackgroundPattern.stripes:
+        return _StripesPainter(color: color, gap: spec.patternCell);
+      case BackgroundPattern.grain:
+        return _GrainPainter(
+          color: spec.patternColor,
+          opacity: spec.patternOpacity,
+        );
+    }
+  }
 }
 
 /// Dibuja un tablero de cuadros.
@@ -124,4 +140,93 @@ class _CheckerPainter extends CustomPainter {
   @override
   bool shouldRepaint(_CheckerPainter old) =>
       old.color != color || old.cell != cell;
+}
+
+/// Dibuja rayas diagonales.
+class _StripesPainter extends CustomPainter {
+  final Color color;
+  final double gap;
+
+  const _StripesPainter({required this.color, required this.gap});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = gap * 0.22;
+    for (var x = -size.height; x < size.width; x += gap) {
+      canvas.drawLine(
+        Offset(x, size.height),
+        Offset(x + size.height, 0),
+        paint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(_StripesPainter old) =>
+      old.color != color || old.gap != gap;
+}
+
+/// Dibuja grano de película y algunos rayones (estética sucia).
+class _GrainPainter extends CustomPainter {
+  final Color color;
+  final double opacity;
+
+  const _GrainPainter({required this.color, required this.opacity});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    // Semilla fija: el grano es siempre el mismo y no parpadea.
+    final random = math.Random(7);
+    final count = math.min(9000, (size.width * size.height / 45).floor());
+
+    final light = <Offset>[];
+    final dark = <Offset>[];
+    for (var i = 0; i < count; i++) {
+      final point = Offset(
+        random.nextDouble() * size.width,
+        random.nextDouble() * size.height,
+      );
+      (i.isEven ? light : dark).add(point);
+    }
+
+    canvas.drawPoints(
+      PointMode.points,
+      light,
+      Paint()
+        ..color = color.withValues(alpha: opacity)
+        ..strokeWidth = 1.6
+        ..strokeCap = StrokeCap.round,
+    );
+    canvas.drawPoints(
+      PointMode.points,
+      dark,
+      Paint()
+        ..color = Colors.black.withValues(alpha: math.min(1.0, opacity * 2.5))
+        ..strokeWidth = 1.6
+        ..strokeCap = StrokeCap.round,
+    );
+
+    final scratch = Paint()
+      ..color = color.withValues(alpha: opacity * 0.9)
+      ..strokeWidth = 0.8;
+    for (var i = 0; i < 16; i++) {
+      final start = Offset(
+        random.nextDouble() * size.width,
+        random.nextDouble() * size.height,
+      );
+      final length = 20 + random.nextDouble() * 90;
+      final angle = random.nextDouble() * math.pi;
+      canvas.drawLine(
+        start,
+        start + Offset(math.cos(angle) * length, math.sin(angle) * length),
+        scratch,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(_GrainPainter old) =>
+      old.color != color || old.opacity != opacity;
 }
