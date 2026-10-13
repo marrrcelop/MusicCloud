@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../models/album.dart';
@@ -12,7 +13,7 @@ import '../models/song.dart';
 import 'app_error.dart';
 import 'drive_audio_source.dart';
 import 'library_cache.dart';
-import 'dart:typed_data';
+import 'upload_tools.dart';
 
 /// Resultado de leer Drive: la biblioteca y los album.json conocidos.
 class LibraryResult {
@@ -24,6 +25,8 @@ class LibraryResult {
 
 class DriveService {
   static const _timeout = Duration(seconds: 25);
+  static const _writeTimeout = Duration(seconds: 60);
+  static const _uploadTimeout = Duration(minutes: 2);
   static const _folderMime = 'application/vnd.google-apps.folder';
 
   /// Cuántas carpetas se consultan en cada petición a Drive.
@@ -38,9 +41,14 @@ class DriveService {
   /// Intentos por petición antes de rendirse.
   static const _maxAttempts = 3;
 
+  /// Tamaño de cada parte al subir archivos. Drive exige múltiplos de 256 KiB.
+  static const _chunkSize = 4 * 1024 * 1024;
+
   /// Un solo cliente HTTP para todas las peticiones: reutiliza las conexiones
   /// en vez de abrir y negociar una nueva (con su cifrado) en cada petición.
   static final http.Client _client = http.Client();
+
+  // ---------- Lectura ----------
 
   /// Lee Drive y arma la biblioteca.
   ///
@@ -79,8 +87,8 @@ class DriveService {
       for (final f in folderFiles) f['id'] as String: f['name'] as String,
     };
 
-    // Solo miramos imágenes y datos dentro de las carpetas que tienen música.
-    final parentIds = <String>{
+    // Carpetas que tienen música.
+    final audioParents = <String>{
       for (final f in audioFiles)
         if (_parentOf(f) != null) _parentOf(f)!,
     };
@@ -89,14 +97,14 @@ class DriveService {
     onBasic?.call(_assemble(
       audioFiles: audioFiles,
       folderNames: folderNames,
-      parentIds: parentIds,
+      parentIds: audioParents,
       metaByParent: const {},
       albumCovers: const {},
       songCovers: const {},
       incomplete: false,
     ));
 
-    // 2) Opcional: portadas y datos. Si fallan, la biblioteca carga igual.
+    // 2) Opcional: datos y portadas. Si fallan, la biblioteca carga igual.
     var incomplete = false;
 
     Future<List<Map<String, dynamic>>> optional(
@@ -112,32 +120,39 @@ class DriveService {
       }
     }
 
-    final found = await Future.wait([
-      // Todos los album.json en una sola búsqueda (son pocos y se buscan por nombre).
-      optional('los datos de los álbumes', () async {
-        final all = await _listFiles(
-          getHeaders,
-          query: "name = 'album.json' and trashed = false",
-          fields: 'id, parents, modifiedTime',
-        );
-        return [
-          for (final f in all)
-            if (parentIds.contains(_parentOf(f))) f,
-        ];
-      }),
-      // Las imágenes sí se buscan carpeta por carpeta, para no recorrer tus fotos.
-      optional(
-        'las portadas',
-        () => _listInParents(
-          getHeaders,
-          parentIds,
-          condition: "mimeType contains 'image/'",
-          fields: 'id, name, parents, modifiedTime',
-        ),
+    // Todos los album.json en una sola búsqueda (se buscan por nombre).
+    final allMetaFiles = await optional(
+      'los datos de los álbumes',
+      () => _listFiles(
+        getHeaders,
+        query: "name = 'album.json' and trashed = false",
+        fields: 'id, parents, modifiedTime',
       ),
-    ]);
-    final metaFiles = found[0];
-    final imageFiles = found[1];
+    );
+
+    // Una carpeta con album.json cuenta como álbum aunque todavía no tenga canciones.
+    final albumParents = <String>{...audioParents};
+    for (final f in allMetaFiles) {
+      final parent = _parentOf(f);
+      if (parent != null && folderNames.containsKey(parent)) {
+        albumParents.add(parent);
+      }
+    }
+    final metaFiles = [
+      for (final f in allMetaFiles)
+        if (albumParents.contains(_parentOf(f))) f,
+    ];
+
+    // Las imágenes se buscan carpeta por carpeta, para no recorrer tus fotos.
+    final imageFiles = await optional(
+      'las portadas',
+      () => _listInParents(
+        getHeaders,
+        albumParents,
+        condition: "mimeType contains 'image/'",
+        fields: 'id, name, parents, modifiedTime',
+      ),
+    );
     debugPrint(
       'Drive: ${imageFiles.length} imágenes y ${metaFiles.length} album.json '
       '(${watch.elapsedMilliseconds} ms)',
@@ -230,7 +245,7 @@ class DriveService {
     final library = _assemble(
       audioFiles: audioFiles,
       folderNames: folderNames,
-      parentIds: parentIds,
+      parentIds: albumParents,
       metaByParent: metaByParent,
       albumCovers: albumCovers,
       songCovers: songCovers,
@@ -292,7 +307,7 @@ class DriveService {
         coverUri: ownCover ?? album?.coverUri,
         genre: songMeta?.genre ?? albumMeta?.genre,
         year: songMeta?.year ?? albumMeta?.year,
-        added: DateTime.tryParse((f['createdTime'] as String?) ?? ''),////////////////errrrrrorrrrrrrrrrr//////
+        added: DateTime.tryParse((f['createdTime'] as String?) ?? ''),
       ));
     }
 
@@ -313,6 +328,343 @@ class DriveService {
     });
     final response = await _get(getHeaders, uri);
     return response.bodyBytes;
+  }
+
+  // ---------- Escritura (editar, crear, mover, subir, mover a la papelera) ----------
+
+  Uri _fileUri(String id) =>
+      Uri.https('www.googleapis.com', '/drive/v3/files/$id');
+
+  /// Cambia el nombre de un archivo o carpeta.
+  Future<void> renameFile(
+    HeadersProvider getHeaders,
+    String id,
+    String name,
+  ) async {
+    await _request(getHeaders, 'PATCH', _fileUri(id), json: {'name': name});
+  }
+
+  /// Mueve un archivo o carpeta a la papelera de Drive (se puede recuperar).
+  Future<void> trashFile(HeadersProvider getHeaders, String id) async {
+    await _request(getHeaders, 'PATCH', _fileUri(id), json: {'trashed': true});
+  }
+
+  /// Mueve un archivo a otra carpeta.
+  Future<void> moveFile(
+    HeadersProvider getHeaders,
+    String id, {
+    required String toParent,
+    String? fromParent,
+  }) async {
+    await _request(
+      getHeaders,
+      'PATCH',
+      Uri.https('www.googleapis.com', '/drive/v3/files/$id', {
+        'addParents': toParent,
+        if (fromParent != null) 'removeParents': fromParent,
+        'fields': 'id',
+      }),
+      json: const <String, dynamic>{},
+    );
+  }
+
+  /// Crea una carpeta y devuelve su id. Por defecto, en la raíz de Drive.
+  Future<String> createFolder(
+    HeadersProvider getHeaders, {
+    required String name,
+    String parentId = 'root',
+  }) async {
+    final response = await _request(
+      getHeaders,
+      'POST',
+      Uri.https('www.googleapis.com', '/drive/v3/files', {'fields': 'id'}),
+      json: {
+        'name': name,
+        'mimeType': _folderMime,
+        'parents': [parentId],
+      },
+    );
+    final data = jsonDecode(utf8.decode(response.bodyBytes));
+    return (data as Map<String, dynamic>)['id'] as String;
+  }
+
+  /// Reemplaza el contenido de un archivo que ya existe.
+  Future<void> updateContent(
+    HeadersProvider getHeaders,
+    String id,
+    Uint8List bytes,
+    String mimeType,
+  ) async {
+    await _request(
+      getHeaders,
+      'PATCH',
+      Uri.https('www.googleapis.com', '/upload/drive/v3/files/$id', {
+        'uploadType': 'media',
+      }),
+      bytes: bytes,
+      contentType: mimeType,
+    );
+  }
+
+  /// Crea un archivo pequeño (album.json, portadas) dentro de una carpeta y
+  /// devuelve su id. Para canciones se usa [uploadFile].
+  Future<String> createFile(
+    HeadersProvider getHeaders, {
+    required String name,
+    required String parentId,
+    required String mimeType,
+    required Uint8List bytes,
+  }) async {
+    // Una sola petición con los datos del archivo y su contenido.
+    final boundary = 'musiccloud${DateTime.now().microsecondsSinceEpoch}';
+    final metadata = jsonEncode({
+      'name': name,
+      'parents': [parentId],
+    });
+    final body = BytesBuilder()
+      ..add(utf8.encode(
+        '--$boundary\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n'
+        '$metadata\r\n',
+      ))
+      ..add(utf8.encode('--$boundary\r\nContent-Type: $mimeType\r\n\r\n'))
+      ..add(bytes)
+      ..add(utf8.encode('\r\n--$boundary--'));
+
+    final response = await _request(
+      getHeaders,
+      'POST',
+      Uri.https('www.googleapis.com', '/upload/drive/v3/files', {
+        'uploadType': 'multipart',
+        'fields': 'id',
+      }),
+      bytes: body.takeBytes(),
+      contentType: 'multipart/related; boundary=$boundary',
+    );
+    final data = jsonDecode(utf8.decode(response.bodyBytes));
+    return (data as Map<String, dynamic>)['id'] as String;
+  }
+
+  /// Sube un archivo grande (una canción) por partes y devuelve su id.
+  /// Si la red se corta, pregunta a Drive hasta dónde llegó y retoma desde ahí.
+  ///
+  /// [onProgress] recibe los bytes enviados y el total. [isCancelled] se
+  /// consulta entre parte y parte; si devuelve true, se lanza [UploadCancelled].
+  Future<String> uploadFile(
+    HeadersProvider getHeaders, {
+    required String path,
+    required String name,
+    required String parentId,
+    required String mimeType,
+    void Function(int sent, int total)? onProgress,
+    bool Function()? isCancelled,
+  }) async {
+    final total = await File(path).length();
+    final session = await _openUploadSession(
+      getHeaders,
+      name: name,
+      parentId: parentId,
+      mimeType: mimeType,
+      total: total,
+    );
+
+    final raf = await File(path).open();
+    try {
+      var sent = 0;
+      var failures = 0;
+      onProgress?.call(0, total);
+
+      while (true) {
+        if (isCancelled?.call() ?? false) throw const UploadCancelled();
+
+        if (sent >= total) {
+          // Ya se enviaron todos los bytes: preguntamos a Drive por el resultado.
+          final status = await _queryUpload(session, total);
+          final id = status.id;
+          if (id != null) return id;
+          throw StateError('Drive no confirmó la subida de $name.');
+        }
+
+        final length = math.min(_chunkSize, total - sent);
+        await raf.setPosition(sent);
+        final bytes = await raf.read(length);
+        final range = 'bytes $sent-${sent + bytes.length - 1}/$total';
+
+        http.Response? response;
+        Object? error;
+        try {
+          response = await _putRange(session, range, bytes);
+        } catch (e) {
+          error = e;
+        }
+
+        if (response != null && response.statusCode < 500) {
+          failures = 0;
+          final code = response.statusCode;
+          if (code == 200 || code == 201) {
+            onProgress?.call(total, total);
+            return _idOf(response);
+          }
+          if (code == 308) {
+            sent = _nextOffset(response);
+            onProgress?.call(sent, total);
+            continue;
+          }
+          debugPrint('Drive respondió $code a la subida: ${response.body}');
+          throw DriveException(code);
+        }
+
+        // Fallo temporal (red o servidor de Drive): se reintenta.
+        final cause = error ?? DriveException(response!.statusCode);
+        final temporary = error == null ||
+            error is TimeoutException ||
+            error is SocketException ||
+            error is http.ClientException;
+        failures++;
+        if (!temporary || failures > 4) throw cause;
+
+        debugPrint('Reintentando la subida de $name ($failures/4): $cause');
+        await Future.delayed(Duration(seconds: failures * 2));
+        try {
+          final status = await _queryUpload(session, total);
+          final id = status.id;
+          if (id != null) {
+            onProgress?.call(total, total);
+            return id;
+          }
+          sent = status.next;
+        } catch (_) {
+          // Si todavía no hay red, el próximo intento volverá a probar.
+        }
+      }
+    } finally {
+      await raf.close();
+    }
+  }
+
+  /// Abre una sesión de subida y devuelve la dirección a la que se envían las partes.
+  Future<Uri> _openUploadSession(
+    HeadersProvider getHeaders, {
+    required String name,
+    required String parentId,
+    required String mimeType,
+    required int total,
+  }) async {
+    final uri = Uri.https('www.googleapis.com', '/upload/drive/v3/files', {
+      'uploadType': 'resumable',
+    });
+
+    Future<http.Response> send(Map<String, String> auth) async {
+      final request = http.Request('POST', uri)..headers.addAll(auth);
+      request.headers['Content-Type'] = 'application/json; charset=UTF-8';
+      request.headers['X-Upload-Content-Type'] = mimeType;
+      request.headers['X-Upload-Content-Length'] = '$total';
+      request.body = jsonEncode({
+        'name': name,
+        'parents': [parentId],
+      });
+      final streamed = await _client.send(request).timeout(_writeTimeout);
+      return http.Response.fromStream(streamed);
+    }
+
+    var headers = await getHeaders();
+    if (headers == null) throw const SessionException();
+    var response = await send(headers);
+
+    if (response.statusCode == 401) {
+      headers = await getHeaders(forceRefresh: true);
+      if (headers == null) throw const SessionException();
+      response = await send(headers);
+    }
+
+    if (response.statusCode != 200) {
+      debugPrint('Drive respondió ${response.statusCode} al abrir la subida: '
+          '${response.body}');
+      throw DriveException(response.statusCode);
+    }
+    final location = response.headers['location'];
+    if (location == null) {
+      throw StateError('Drive no entregó la dirección de subida.');
+    }
+    return Uri.parse(location);
+  }
+
+  Future<http.Response> _putRange(
+    Uri session,
+    String range,
+    Uint8List? bytes,
+  ) async {
+    final request = http.Request('PUT', session)..followRedirects = false;
+    request.headers['Content-Range'] = range;
+    if (bytes != null) request.bodyBytes = bytes;
+    final streamed = await _client.send(request).timeout(_uploadTimeout);
+    return http.Response.fromStream(streamed);
+  }
+
+  /// Pregunta a Drive cuántos bytes tiene ya (o el id, si la subida terminó).
+  Future<({int next, String? id})> _queryUpload(Uri session, int total) async {
+    final response = await _putRange(session, 'bytes */$total', null);
+    if (response.statusCode == 200 || response.statusCode == 201) {
+      return (next: total, id: _idOf(response));
+    }
+    if (response.statusCode == 308) {
+      return (next: _nextOffset(response), id: null);
+    }
+    throw DriveException(response.statusCode);
+  }
+
+  String _idOf(http.Response response) {
+    final data = jsonDecode(response.body);
+    return (data as Map<String, dynamic>)['id'] as String;
+  }
+
+  /// Drive responde "Range: bytes=0-4194303": lo siguiente por enviar es 4194304.
+  int _nextOffset(http.Response response) {
+    final range = response.headers['range'];
+    if (range == null) return 0;
+    return int.parse(range.split('-').last) + 1;
+  }
+
+  /// Petición que modifica algo en Drive. Renueva el token si venció.
+  /// No se reintenta sola: repetir una creación podría duplicar archivos.
+  Future<http.Response> _request(
+    HeadersProvider getHeaders,
+    String method,
+    Uri uri, {
+    Object? json,
+    Uint8List? bytes,
+    String? contentType,
+  }) async {
+    Future<http.Response> send(Map<String, String> auth) async {
+      final request = http.Request(method, uri)..headers.addAll(auth);
+      if (json != null) {
+        request.headers['Content-Type'] = 'application/json; charset=UTF-8';
+        request.body = jsonEncode(json);
+      } else if (bytes != null) {
+        if (contentType != null) request.headers['Content-Type'] = contentType;
+        request.bodyBytes = bytes;
+      }
+      final streamed = await _client.send(request).timeout(_writeTimeout);
+      return http.Response.fromStream(streamed);
+    }
+
+    var headers = await getHeaders();
+    if (headers == null) throw const SessionException();
+    var response = await send(headers);
+
+    if (response.statusCode == 401) {
+      headers = await getHeaders(forceRefresh: true);
+      if (headers == null) throw const SessionException();
+      response = await send(headers);
+    }
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      debugPrint(
+        'Drive respondió ${response.statusCode} a $method ${uri.path}: '
+        '${response.body}',
+      );
+      throw DriveException(response.statusCode);
+    }
+    return response;
   }
 
   // ---------- Consultas a Drive ----------
@@ -426,126 +778,6 @@ class DriveService {
     }
     return response;
   }
-  // ---------- Escritura (editar, subir, mover a la papelera) ----------
-
-  static const _uploadTimeout = Duration(seconds: 60);
-
-  Uri _fileUri(String id) =>
-      Uri.https('www.googleapis.com', '/drive/v3/files/$id');
-
-  /// Cambia el nombre de un archivo o carpeta.
-  Future<void> renameFile(
-    HeadersProvider getHeaders,
-    String id,
-    String name,
-  ) async {
-    await _request(getHeaders, 'PATCH', _fileUri(id), json: {'name': name});
-  }
-
-  /// Mueve un archivo o carpeta a la papelera de Drive (se puede recuperar).
-  Future<void> trashFile(HeadersProvider getHeaders, String id) async {
-    await _request(getHeaders, 'PATCH', _fileUri(id), json: {'trashed': true});
-  }
-
-  /// Reemplaza el contenido de un archivo que ya existe.
-  Future<void> updateContent(
-    HeadersProvider getHeaders,
-    String id,
-    Uint8List bytes,
-    String mimeType,
-  ) async {
-    await _request(
-      getHeaders,
-      'PATCH',
-      Uri.https('www.googleapis.com', '/upload/drive/v3/files/$id', {
-        'uploadType': 'media',
-      }),
-      bytes: bytes,
-      contentType: mimeType,
-    );
-  }
-
-  /// Crea un archivo nuevo dentro de una carpeta y devuelve su id.
-  Future<String> createFile(
-    HeadersProvider getHeaders, {
-    required String name,
-    required String parentId,
-    required String mimeType,
-    required Uint8List bytes,
-  }) async {
-    // Una sola petición con los datos del archivo y su contenido.
-    final boundary = 'musiccloud${DateTime.now().microsecondsSinceEpoch}';
-    final metadata = jsonEncode({
-      'name': name,
-      'parents': [parentId],
-    });
-    final body = BytesBuilder()
-      ..add(utf8.encode(
-        '--$boundary\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n'
-        '$metadata\r\n',
-      ))
-      ..add(utf8.encode('--$boundary\r\nContent-Type: $mimeType\r\n\r\n'))
-      ..add(bytes)
-      ..add(utf8.encode('\r\n--$boundary--'));
-
-    final response = await _request(
-      getHeaders,
-      'POST',
-      Uri.https('www.googleapis.com', '/upload/drive/v3/files', {
-        'uploadType': 'multipart',
-        'fields': 'id',
-      }),
-      bytes: body.takeBytes(),
-      contentType: 'multipart/related; boundary=$boundary',
-    );
-    final data = jsonDecode(utf8.decode(response.bodyBytes));
-    return (data as Map<String, dynamic>)['id'] as String;
-  }
-
-  /// Petición que modifica algo en Drive. Renueva el token si venció.
-  /// No se reintenta sola: repetir una creación podría duplicar archivos.
-  Future<http.Response> _request(
-    HeadersProvider getHeaders,
-    String method,
-    Uri uri, {
-    Object? json,
-    Uint8List? bytes,
-    String? contentType,
-  }) async {
-    Future<http.Response> send(Map<String, String> auth) async {
-      final request = http.Request(method, uri)..headers.addAll(auth);
-      if (json != null) {
-        request.headers['Content-Type'] = 'application/json; charset=UTF-8';
-        request.body = jsonEncode(json);
-      } else if (bytes != null) {
-        if (contentType != null) request.headers['Content-Type'] = contentType;
-        request.bodyBytes = bytes;
-      }
-      final streamed = await _client.send(request).timeout(_uploadTimeout);
-      return http.Response.fromStream(streamed);
-    }
-
-    var headers = await getHeaders();
-    if (headers == null) throw const SessionException();
-    var response = await send(headers);
-
-    if (response.statusCode == 401) {
-      headers = await getHeaders(forceRefresh: true);
-      if (headers == null) throw const SessionException();
-      response = await send(headers);
-    }
-
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      debugPrint(
-        'Drive respondió ${response.statusCode} a $method ${uri.path}: '
-        '${response.body}',
-      );
-      throw DriveException(response.statusCode);
-    }
-    return response;
-  }
-
-
 
   // ---------- Utilidades ----------
 

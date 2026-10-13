@@ -29,6 +29,7 @@ class Library {
   Library._(this.songs, this.albums, this._songsByAlbum, this.incomplete);
 
   /// Arma la biblioteca a partir de las canciones y los álbumes (carpetas).
+  /// Un álbum puede estar vacío (por ejemplo, uno recién creado).
   factory Library.build({
     required List<Song> songs,
     required Map<String, Album> folders,
@@ -51,10 +52,8 @@ class Library {
           .compareTo(sortKey(b.fileName ?? b.title)));
     }
 
-    final albums = <Album>[
-      for (final entry in byAlbum.entries)
-        if (entry.key != noAlbumId) folders[entry.key]!,
-    ]..sort((a, b) => sortKey(a.name).compareTo(sortKey(b.name)));
+    final albums = [...folders.values]
+      ..sort((a, b) => sortKey(a.name).compareTo(sortKey(b.name)));
 
     if (byAlbum.containsKey(noAlbumId)) {
       albums.add(const Album(

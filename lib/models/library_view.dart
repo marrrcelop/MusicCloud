@@ -102,12 +102,16 @@ class LibraryView {
 
     // 1) Filtrar
     final songs = library.songs.where(matches).toList();
+    // Sin búsqueda ni filtros, se muestran también los álbumes vacíos.
+    final hasCriteria = words.isNotEmpty ||
+        artistKey != null ||
+        genreKey != null ||
+        year != null;
     final byAlbum = <String, List<Song>>{};
     for (final album in library.albums) {
       final list = library.songsOf(album.id).where(matches).toList();
-      if (list.isNotEmpty) byAlbum[album.id] = list;
+      if (list.isNotEmpty || !hasCriteria) byAlbum[album.id] = list;
     }
-
     // 2) Ordenar canciones
     int tieBreak(Song a, Song b) {
       final ka = keys[a.id]!, kb = keys[b.id]!;

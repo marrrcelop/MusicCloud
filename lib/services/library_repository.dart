@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import '../models/album.dart';
 import '../models/album_meta_editor.dart';
@@ -10,6 +11,7 @@ import 'auth_service.dart';
 import 'drive_service.dart';
 import 'image_tools.dart';
 import 'library_cache.dart';
+import 'upload_tools.dart';
 
 enum RefreshStatus {
   /// Todo salió bien.
@@ -29,14 +31,17 @@ class RefreshResult {
   final RefreshStatus status;
   final AppError? error;
 
-  const RefreshResult(this.status, [this.error]);
+  /// Avisos de partes que no se pudieron completar (lo principal sí salió).
+  final List<String> warnings;
+
+  const RefreshResult(this.status, {this.error, this.warnings = const []});
 }
 
 /// Único punto de acceso a la biblioteca de música.
 ///
 /// Las pantallas solo piden "dame la biblioteca" ([library]) y "actualiza"
 /// ([refresh]); no saben si los datos vienen de Drive o de lo guardado en el
-/// teléfono. También concentra las ediciones y borrados.
+/// teléfono. También concentra las ediciones, movimientos, subidas y borrados.
 class LibraryRepository extends ChangeNotifier {
   final AuthService _auth;
   final DriveService _drive;
@@ -129,7 +134,7 @@ class LibraryRepository extends ChangeNotifier {
       final error = _isOnline() ? AppError.from(e) : AppError.offline;
       _error = error;
       _upToDate = false;
-      return RefreshResult(RefreshStatus.failed, error);
+      return RefreshResult(RefreshStatus.failed, error: error);
     } finally {
       _loading = false;
       notifyListeners();
@@ -146,7 +151,7 @@ class LibraryRepository extends ChangeNotifier {
     notifyListeners();
   }
 
-  // ---------- Edición y borrado ----------
+  // ---------- Edición, creación, movimientos, subidas y borrado ----------
   //
   // Estas operaciones SÍ lanzan errores (la pantalla los muestra). Al terminar
   // vuelven a leer Drive para mostrar el estado real.
@@ -197,8 +202,12 @@ class LibraryRepository extends ChangeNotifier {
     try {
       // 1) Datos (primero, porque es lo que más puede fallar sin haber cambiado nada).
       final fields = <String, Object?>{};
-      if (artist.trim() != (album.artist ?? '')) fields['artist'] = _orNull(artist);
-      if (genre.trim() != (album.genre ?? '')) fields['genre'] = _orNull(genre);
+      if (artist.trim() != (album.artist ?? '')) {
+        fields['artist'] = _orNull(artist);
+      }
+      if (genre.trim() != (album.genre ?? '')) {
+        fields['genre'] = _orNull(genre);
+      }
       if (year != album.year) fields['year'] = year;
       if (fields.isNotEmpty) await _updateAlbumJson(album.id, album: fields);
 
@@ -230,6 +239,210 @@ class LibraryRepository extends ChangeNotifier {
       failure = e;
     }
     return _finishWrite(failure);
+  }
+
+  /// Crea un álbum nuevo (una carpeta en la raíz de Drive) y devuelve su id.
+  Future<String> createAlbum(String name) async {
+    String? id;
+    Object? failure;
+    try {
+      final folderId = await _drive.createFolder(
+        _auth.getHeaders,
+        name: name.trim(),
+      );
+      id = folderId;
+      try {
+        // El album.json vacío hace que la carpeta cuente como álbum aunque
+        // todavía no tenga canciones.
+        await _drive.createFile(
+          _auth.getHeaders,
+          name: 'album.json',
+          parentId: folderId,
+          mimeType: 'application/json',
+          bytes: Uint8List.fromList(utf8.encode('{}')),
+        );
+      } catch (e) {
+        // No dejamos una carpeta invisible: la retiramos.
+        try {
+          await _drive.trashFile(_auth.getHeaders, folderId);
+        } catch (_) {}
+        id = null;
+        rethrow;
+      }
+    } catch (e) {
+      failure = e;
+    }
+    await _finishWrite(failure); // si hubo un fallo, lo lanza aquí
+    return id!;
+  }
+
+  /// Mueve una canción a otro álbum, llevándose su imagen propia y sus datos.
+  Future<RefreshResult> moveSong(Song song, Album destination) async {
+    final fileName = song.fileName;
+    final sourceId = song.albumId;
+    if (fileName == null) {
+      throw StateError('La canción no tiene nombre de archivo.');
+    }
+    if (sourceId == destination.id) {
+      throw StateError('La canción ya está en ese álbum.');
+    }
+
+    // ¿Tiene una imagen propia (distinta de la portada del álbum)?
+    Album? source;
+    for (final a in _library?.albums ?? const <Album>[]) {
+      if (a.id == sourceId) source = a;
+    }
+    final ownCoverId =
+        (song.coverUri != null && song.coverUri != source?.coverUri)
+            ? _coverFileId(song.coverUri)
+            : null;
+
+    final warnings = <String>[];
+    Object? failure;
+    try {
+      // 1) Leemos los datos propios de la canción (sin modificar nada todavía).
+      Map<String, dynamic>? entry;
+      String? sourceText;
+      final sourceJsonId = sourceId == null ? null : _metaFileIdFor(sourceId);
+      if (sourceJsonId != null) {
+        try {
+          final raw = await _drive.downloadBytes(_auth.getHeaders, sourceJsonId);
+          final taken = AlbumMetaEditor.takeSong(
+            utf8.decode(raw, allowMalformed: true),
+            fileName,
+          );
+          entry = taken.entry;
+          if (entry != null) sourceText = taken.text;
+        } catch (e) {
+          debugPrint('No se pudieron leer los datos de la canción: $e');
+          warnings.add('No se pudieron leer los datos de la canción.');
+        }
+      }
+
+      // 2) Mover el archivo: lo único imprescindible.
+      await _drive.moveFile(
+        _auth.getHeaders,
+        song.id,
+        toParent: destination.id,
+        fromParent: sourceId,
+      );
+
+      // 3) El resto es "lo mejor posible": la canción ya está movida.
+      if (ownCoverId != null) {
+        try {
+          await _drive.moveFile(
+            _auth.getHeaders,
+            ownCoverId,
+            toParent: destination.id,
+            fromParent: sourceId,
+          );
+        } catch (e) {
+          debugPrint('No se pudo mover la imagen de la canción: $e');
+          warnings.add('No se pudo mover la imagen propia de la canción.');
+        }
+      }
+      if (entry != null) {
+        try {
+          await _updateAlbumJson(
+            destination.id,
+            songFileName: fileName,
+            song: entry,
+          );
+          if (sourceJsonId != null && sourceText != null) {
+            await _drive.updateContent(
+              _auth.getHeaders,
+              sourceJsonId,
+              Uint8List.fromList(utf8.encode(sourceText)),
+              'application/json',
+            );
+          }
+        } catch (e) {
+          debugPrint('No se pudieron mover los datos de la canción: $e');
+          warnings.add(
+            'No se pudieron mover los datos de la canción '
+            '(quedaron en el álbum de origen).',
+          );
+        }
+      }
+    } catch (e) {
+      failure = e;
+    }
+
+    final refreshed = await _finishWrite(failure);
+    return RefreshResult(
+      refreshed.status,
+      error: refreshed.error,
+      warnings: warnings,
+    );
+  }
+
+  /// Sube canciones a un álbum, una por una. No lanza errores por archivo:
+  /// los reporta en el resultado.
+  Future<UploadReport> uploadSongs(
+    Album album,
+    List<UploadItem> items, {
+    void Function(int index, int sent, int total)? onProgress,
+    bool Function()? isCancelled,
+  }) async {
+    final existing = <String>{
+      for (final s in _library?.songsOf(album.id) ?? const <Song>[])
+        if (s.fileName != null) s.fileName!.toLowerCase(),
+    };
+
+    var uploaded = 0;
+    var cancelled = false;
+    final skipped = <String>[];
+    final failed = <String>[];
+
+    for (var i = 0; i < items.length; i++) {
+      final item = items[i];
+      if (isCancelled?.call() ?? false) {
+        cancelled = true;
+        break;
+      }
+      if (existing.contains(item.name.toLowerCase())) {
+        skipped.add(item.name);
+        continue;
+      }
+
+      onProgress?.call(i, 0, item.size);
+      try {
+        await _drive.uploadFile(
+          _auth.getHeaders,
+          path: item.path,
+          name: item.name,
+          parentId: album.id,
+          mimeType: item.mimeType,
+          onProgress: (sent, total) => onProgress?.call(i, sent, total),
+          isCancelled: isCancelled,
+        );
+        uploaded++;
+        existing.add(item.name.toLowerCase());
+      } on UploadCancelled {
+        cancelled = true;
+        break;
+      } catch (e) {
+        debugPrint('No se pudo subir ${item.name}: $e');
+        final reason = _isOnline() ? AppError.from(e).message : AppError.offline.message;
+        failed.add('${item.name}: $reason');
+        // Sin sesión o sin permiso, el resto tampoco se podrá subir.
+        if (e is SessionException ||
+            (e is DriveException &&
+                (e.statusCode == 401 || e.statusCode == 403))) {
+          break;
+        }
+      }
+    }
+
+    // Se actualiza la biblioteca aunque algo haya fallado: pudo subirse parte.
+    if (uploaded > 0) await _finishWrite(null);
+
+    return UploadReport(
+      uploaded: uploaded,
+      skipped: skipped,
+      failed: failed,
+      cancelled: cancelled,
+    );
   }
 
   /// Mueve una canción a la papelera de Drive.

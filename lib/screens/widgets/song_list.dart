@@ -3,7 +3,7 @@ import '../../models/song.dart';
 import '../../services/player_service.dart';
 import 'cover_art.dart';
 
-enum SongAction { edit, trash }
+enum SongAction { edit, move, trash }
 
 class SongList extends StatelessWidget {
   final PlayerService player;
@@ -55,6 +55,10 @@ class SongList extends StatelessWidget {
                               PopupMenuItem(
                                 value: SongAction.edit,
                                 child: Text('Editar datos'),
+                              ),
+                              PopupMenuItem(
+                                value: SongAction.move,
+                                child: Text('Mover a otro álbum…'),
                               ),
                               PopupMenuItem(
                                 value: SongAction.trash,

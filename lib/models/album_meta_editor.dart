@@ -20,7 +20,8 @@ class AlbumMetaEditor {
 
     if (songFileName != null) {
       final rawSongs = root['songs'];
-      final songs = rawSongs is Map<String, dynamic> ? rawSongs : <String, dynamic>{};
+      final songs =
+          rawSongs is Map<String, dynamic> ? rawSongs : <String, dynamic>{};
 
       // Si la canción ya tiene entrada (con o sin extensión), usamos esa misma.
       final wanted = _norm(songFileName);
@@ -50,6 +51,44 @@ class AlbumMetaEditor {
     return const JsonEncoder.withIndent('  ').convert(root);
   }
 
+  /// Saca la entrada de una canción. Devuelve el texto nuevo (sin esa entrada)
+  /// y la entrada, o entrada null si la canción no tenía datos propios.
+  static ({String text, Map<String, dynamic>? entry}) takeSong(
+    String currentText,
+    String songFileName,
+  ) {
+    final root = _parse(currentText);
+    final rawSongs = root['songs'];
+    if (rawSongs is! Map<String, dynamic>) {
+      return (text: currentText, entry: null);
+    }
+
+    final songs = Map<String, dynamic>.from(rawSongs);
+    final wanted = _norm(songFileName);
+    String? foundKey;
+    for (final key in songs.keys) {
+      if (_norm(key) == wanted) {
+        foundKey = key;
+        break;
+      }
+    }
+    if (foundKey == null) return (text: currentText, entry: null);
+
+    final raw = songs.remove(foundKey);
+    final entry =
+        raw is Map<String, dynamic> ? Map<String, dynamic>.from(raw) : null;
+
+    if (songs.isEmpty) {
+      root.remove('songs');
+    } else {
+      root['songs'] = songs;
+    }
+    return (
+      text: const JsonEncoder.withIndent('  ').convert(root),
+      entry: entry,
+    );
+  }
+
   static Map<String, dynamic> _parse(String? text) {
     if (text == null) return <String, dynamic>{};
     final clean = text.startsWith('\uFEFF') ? text.substring(1) : text;
@@ -61,7 +100,10 @@ class AlbumMetaEditor {
     return decoded;
   }
 
-  static void _setFields(Map<String, dynamic> target, Map<String, Object?> fields) {
+  static void _setFields(
+    Map<String, dynamic> target,
+    Map<String, Object?> fields,
+  ) {
     fields.forEach((key, value) {
       final v = value is String ? value.trim() : value;
       if (v == null || (v is String && v.isEmpty)) {

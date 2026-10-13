@@ -11,7 +11,7 @@ import 'widgets/player_bar.dart';
 import 'widgets/song_list.dart';
 import 'album_edit_screen.dart';
 
-enum _AlbumMenu { edit, trash }
+enum _AlbumMenu { add, edit, trash }
 
 class AlbumScreen extends StatelessWidget {
   final String albumId;
@@ -45,6 +45,8 @@ class AlbumScreen extends StatelessWidget {
     _AlbumMenu action,
   ) async {
     switch (action) {
+      case _AlbumMenu.add:
+        await actions.addSongs(context, album);
       case _AlbumMenu.edit:
         if (!actions.requireOnline()) return;
         await Navigator.of(context).push(MaterialPageRoute<bool>(
@@ -82,12 +84,18 @@ class AlbumScreen extends StatelessWidget {
         }
 
         final songs = view.viewOf(library).songsOf(albumId);
-        return _buildScreen(context, album, songs);
+        final isEmptyAlbum = library.songsOf(albumId).isEmpty;
+        return _buildScreen(context, album, songs, isEmptyAlbum);
       },
     );
   }
 
-  Widget _buildScreen(BuildContext context, Album album, List<Song> songs) {
+  Widget _buildScreen(
+    BuildContext context,
+    Album album,
+    List<Song> songs,
+    bool isEmptyAlbum,
+  ) {
     final editable = albumId != Library.noAlbumId;
 
     return Scaffold(
@@ -98,6 +106,10 @@ class AlbumScreen extends StatelessWidget {
             PopupMenuButton<_AlbumMenu>(
               onSelected: (action) => _onMenu(context, album, action),
               itemBuilder: (_) => const [
+                PopupMenuItem(
+                  value: _AlbumMenu.add,
+                  child: Text('Agregar canciones'),
+                ),
                 PopupMenuItem(
                   value: _AlbumMenu.edit,
                   child: Text('Editar álbum'),
@@ -136,7 +148,7 @@ class AlbumScreen extends StatelessWidget {
                           overflow: TextOverflow.ellipsis,
                         ),
                       const SizedBox(height: 8),
-                                      Wrap(
+                      Wrap(
                         spacing: 8,
                         children: [
                           FilledButton.icon(
@@ -162,11 +174,7 @@ class AlbumScreen extends StatelessWidget {
           const Divider(height: 1),
           Expanded(
             child: songs.isEmpty
-                ? const Center(
-                    child: Text(
-                      'Ninguna canción coincide con la búsqueda o los filtros.',
-                    ),
-                  )
+                ? _buildEmpty(context, album, isEmptyAlbum, editable)
                 : SongList(
                     player: player,
                     songs: songs,
@@ -178,6 +186,47 @@ class AlbumScreen extends StatelessWidget {
         ],
       ),
       bottomNavigationBar: PlayerBar(player: player),
+    );
+  }
+
+  Widget _buildEmpty(
+    BuildContext context,
+    Album album,
+    bool isEmptyAlbum,
+    bool editable,
+  ) {
+    if (!isEmptyAlbum) {
+      return const Center(
+        child: Text('Ninguna canción coincide con la búsqueda o los filtros.'),
+      );
+    }
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.library_music_outlined, size: 64),
+            const SizedBox(height: 16),
+            const Text('Este álbum está vacío.'),
+            if (editable) ...[
+              const SizedBox(height: 16),
+              FilledButton.icon(
+                icon: const Icon(Icons.upload_file),
+                label: const Text('Agregar canciones'),
+                onPressed: () => actions.addSongs(context, album),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'También puedes mover canciones desde otro álbum '
+                '(menú ⋮ de cada canción).',
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
+          ],
+        ),
+      ),
     );
   }
 }

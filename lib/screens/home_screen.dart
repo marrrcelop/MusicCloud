@@ -45,10 +45,11 @@ class _HomeScreenState extends State<HomeScreen> {
     auth: _auth,
     isOnline: () => _online,
   );
-   late final LibraryActions _actions = LibraryActions(
+  late final LibraryActions _actions = LibraryActions(
     repo: _repo,
     player: _player,
     isOnline: () => _online,
+    onWifi: _connectivity.isOnWifi,
     notify: _showError,
   );
 
@@ -634,6 +635,10 @@ class _HomeScreenState extends State<HomeScreen> {
       ],
     );
   }
+    Future<void> _createAlbum() async {
+    final album = await _actions.createAlbum(context);
+    if (album != null && mounted) _openAlbum(album);
+  }
     Widget _buildAlbums(LibraryView view) {
     final settings = SettingsScope.of(context);
     final grid = settings.albumGrid;
@@ -651,6 +656,11 @@ class _HomeScreenState extends State<HomeScreen> {
                   count == 1 ? '1 álbum' : '$count álbumes',
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
+              ),
+              IconButton(
+                tooltip: 'Nuevo álbum',
+                icon: const Icon(Icons.create_new_folder_outlined),
+                onPressed: _createAlbum,
               ),
               IconButton(
                 tooltip: grid ? 'Ver como lista' : 'Ver como cuadrícula',
